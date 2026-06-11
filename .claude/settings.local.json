@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:docs.ollama.com)",
+      "Bash(python -c ':*)",
+      "Bash(python3 -c ':*)"
+    ]
+  }
+}

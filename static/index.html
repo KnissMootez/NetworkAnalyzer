@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetworkAnalyzer Copilot</title>
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Share+Tech+Mono&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════ SIDEBAR ═══════════════════════════ -->
+<aside id="sidebar">
+  <div class="sb-brand">
+    <div class="sb-logo">💠 NetworkAnalyzer</div>
+    <div class="sb-sub">AI Copilot</div>
+    <div id="ws-status" class="status-dot disconnected"></div>
+  </div>
+
+  <div class="sb-section">
+    <div class="sb-label">▸ ALERTS</div>
+    <button class="btn-outline" id="scan-btn" onclick="App.scanAlerts()">⚡ SCAN NETWORK</button>
+    <div id="alerts-list"></div>
+  </div>
+
+  <div class="sb-section">
+    <div class="sb-label">▸ QUICK QUERIES</div>
+    <div class="quick-grid">
+      <button class="btn-quick" onclick="App.quickQuery('5G upsell opportunities by region')">📶 5G Upsell</button>
+      <button class="btn-quick" onclick="App.quickQuery('3G sunset risk analysis by region')">📵 3G Sunset</button>
+      <button class="btn-quick" onclick="App.quickQuery('FWA candidates by region')">🏠 FWA Convert</button>
+      <button class="btn-quick" onclick="App.quickQuery('HVC customer status and ARPU breakdown')">💎 HVC Status</button>
+      <button class="btn-quick" onclick="App.quickQuery('Current network KPIs: throughput, drop rate, availability')">⚠️ Network KPIs</button>
+      <button class="btn-quick" onclick="App.quickQuery('Critical alarms by region and type')">🔔 Critical Alarms</button>
+    </div>
+  </div>
+
+  <div class="sb-section">
+    <button class="btn-danger" onclick="App.forgetMemory()">FORGET MEMORY</button>
+  </div>
+</aside>
+
+<!-- ═══════════════════════════ SETTINGS PANEL ═══════════════════════════ -->
+<div id="settings-overlay" onclick="App.closeSettings()"></div>
+<div id="settings-panel">
+  <div class="sp-header">
+    <span class="sp-title">⚙ Settings</span>
+    <button class="sp-close" onclick="App.closeSettings()">✕</button>
+  </div>
+
+  <!-- Nation Theme -->
+  <div class="sp-section">
+    <div class="sp-label">NATION THEME</div>
+    <div class="sp-nations">
+      <button class="nation-btn" data-nation="water" onclick="App.setNation('water')">
+        <img src="/static/logo_water.jpg" alt="Water Tribe">
+        <span class="nation-btn-label">Water Tribe</span>
+      </button>
+      <button class="nation-btn" data-nation="earth" onclick="App.setNation('earth')">
+        <img src="/static/logo_earth.jpg" alt="Earth Kingdom">
+        <span class="nation-btn-label">Earth Kingdom</span>
+      </button>
+      <button class="nation-btn" data-nation="fire" onclick="App.setNation('fire')">
+        <img src="/static/logo_fire.jpg" alt="Fire Nation">
+        <span class="nation-btn-label">Fire Nation</span>
+      </button>
+      <button class="nation-btn" data-nation="air" onclick="App.setNation('air')">
+        <img src="/static/logo_air.jpg" alt="Air Nomads">
+        <span class="nation-btn-label">Air Nomads</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Model -->
+  <div class="sp-section">
+    <div class="sp-label">MODEL</div>
+    <select id="model-select" class="sb-input">
+      <option value="bedrock" selected>Qwen3-32B ☁ Bedrock</option>
+      <option value="bedrock-80b">Qwen3-80B A3B ☁ Bedrock</option>
+      <option value="langgraph">LangGraph ☁ Bedrock</option>
+    </select>
+    <button class="btn-primary" onclick="App.applyModel()">APPLY MODEL</button>
+  </div>
+
+  <!-- Ops Portal link -->
+  <div class="sp-section">
+    <div class="sp-label">PORTALS</div>
+    <a href="http://localhost:8001" target="_blank" class="btn-outline" style="display:block;text-align:center;text-decoration:none;padding:6px">
+      ↗ Ops Portal
+    </a>
+  </div>
+</div>
+
+<!-- Background overlay -->
+<div id="nation-bg"></div>
+
+<!-- ═══════════════════════════ MAIN ══════════════════════════════ -->
+<main id="main">
+
+  <!-- KPI bar -->
+  <div id="kpi-bar">
+    <div class="kpi-card"><div class="kpi-val" id="k-subs">—</div><div class="kpi-lbl">ACTIVE SUBSCRIBERS</div></div>
+    <div class="kpi-card"><div class="kpi-val" id="k-alarms">—</div><div class="kpi-lbl">CRITICAL ALARMS</div></div>
+    <div class="kpi-card"><div class="kpi-val" id="k-hvc">—</div><div class="kpi-lbl">HVC CUSTOMERS</div></div>
+    <div class="kpi-card"><div class="kpi-val" id="k-fwa">—</div><div class="kpi-lbl">FWA CANDIDATES</div></div>
+    <button class="settings-gear" onclick="App.openSettings()" title="Settings">⚙</button>
+  </div>
+
+  <!-- Tab bar -->
+  <nav id="tab-bar">
+    <button class="tab-btn active" data-tab="copilot">💠 COPILOT</button>
+    <button class="tab-btn" data-tab="network">📡 NETWORK</button>
+    <button class="tab-btn" data-tab="subscribers">👥 SUBSCRIBERS</button>
+    <button class="tab-btn" data-tab="commercial">💰 COMMERCIAL</button>
+    <button class="tab-btn" data-tab="campaigns">🎯 CAMPAIGNS</button>
+  </nav>
+
+  <!-- ── COPILOT TAB ── -->
+  <div class="tab-panel active" data-tab="copilot">
+    <div class="two-col">
+
+      <!-- Chat -->
+      <div class="chat-col">
+        <div id="chat-messages">
+          <div class="chat-welcome">
+            <div class="welcome-title">READY FOR ANALYSIS</div>
+            <div class="welcome-sub">Ask about network KPIs · subscriber campaigns<br>5G upsell · FWA conversion · 3G migration</div>
+          </div>
+        </div>
+        <div id="proposal-actions" style="display:none">
+          <button class="btn-confirm" onclick="App.confirm()">✅ CONFIRM</button>
+          <button class="btn-danger"  onclick="App.cancel()">❌ CANCEL</button>
+        </div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" rows="1" placeholder="Ask anything about your network or subscribers..."
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.send()}"
+                    oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
+<button class="btn-send" onclick="App.send()">SEND ▶</button>
+          <button class="btn-stop" id="btn-stop" onclick="App.stop()" style="display:none">■ STOP</button>
+          <button class="btn-continue" id="btn-continue" onclick="App.continueResponse()" style="display:none">▶▶ CONTINUE</button>
+        </div>
+      </div>
+
+      <!-- Snapshot -->
+      <div class="snapshot-col" id="snapshot-col">
+        <button class="snap-expand" onclick="App.toggleSnapshot()" title="Show panel">⟨ PANEL</button>
+        <div class="snap-tabs">
+          <button class="snap-tab active" onclick="App.snapTab(this,'map')">COVERAGE</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'network-snap')">NETWORK</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'subs-snap')">SUBSCRIBERS</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'comm-snap')">COMMERCIAL</button>
+          <button class="snap-collapse" onclick="App.toggleSnapshot()" title="Hide panel">⟩</button>
+        </div>
+        <div id="snap-map"          class="snap-panel active"><div id="coverage-map" class="chart-box"></div></div>
+        <div id="snap-network-snap" class="snap-panel"><div id="snap-alarms-chart" class="chart-box"></div></div>
+        <div id="snap-subs-snap"    class="snap-panel"><div id="snap-tech-chart"   class="chart-box"></div></div>
+        <div id="snap-comm-snap"    class="snap-panel"><div id="snap-arpu-chart"   class="chart-box"></div></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── NETWORK TAB ── -->
+  <div class="tab-panel" data-tab="network">
+    <div class="filter-row">
+      <select id="net-region" onchange="Net.load()" class="filter-sel"><option value="All">All Regions</option></select>
+      <select id="net-tech"   onchange="Net.load()" class="filter-sel">
+        <option value="All">All Tech</option>
+        <option value="4G">4G</option><option value="5G">5G</option>
+        <option value="3G">3G</option><option value="2G">2G</option>
+      </select>
+    </div>
+    <div id="net-kpi-cards" class="kpi-row"></div>
+    <div class="two-chart-row">
+      <div id="net-chart-dl"   class="chart-box"></div>
+      <div id="net-chart-drop" class="chart-box"></div>
+    </div>
+    <div class="section-label">ALARMS</div>
+    <div class="filter-row">
+      <select id="net-sev" onchange="Net.loadAlarms()" class="filter-sel">
+        <option value="All">All Severities</option>
+        <option value="critical">Critical</option><option value="major">Major</option>
+        <option value="minor">Minor</option><option value="warning">Warning</option>
+      </select>
+    </div>
+    <div id="net-alarms-chart" class="chart-box" style="height:220px"></div>
+    <div class="table-wrap"><table id="net-alarms-table" class="data-table"><thead><tr>
+      <th>Type</th><th>Severity</th><th>Site</th><th>Region</th><th>Description</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="section-label" style="margin-top:16px">TOP PROBLEMATIC CELLS</div>
+    <div class="filter-row">
+      <select id="net-cell-sort" onchange="Net.loadCells()" class="filter-sel">
+        <option value="drop_rate">By Drop Rate</option>
+        <option value="throughput">By Low Throughput</option>
+        <option value="availability">By Low Availability</option>
+        <option value="latency">By High Latency</option>
+      </select>
+    </div>
+    <div class="table-wrap"><table id="net-cells-table" class="data-table"><thead><tr>
+      <th>Cell</th><th>Site</th><th>Region</th><th>Tech</th>
+      <th>DL Mbps</th><th>Avail%</th><th>Drop%</th><th>Latency ms</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <!-- ── SUBSCRIBERS TAB ── -->
+  <div class="tab-panel" data-tab="subscribers">
+    <div class="filter-row">
+      <select id="sub-region"  onchange="Subs.load()" class="filter-sel"><option value="All">All Regions</option></select>
+      <select id="sub-segment" onchange="Subs.load()" class="filter-sel">
+        <option value="All">All Segments</option>
+        <option value="prepaid">Prepaid</option><option value="postpaid">Postpaid</option>
+        <option value="enterprise">Enterprise</option>
+      </select>
+    </div>
+    <div id="sub-cap-cards" class="kpi-row"></div>
+    <div class="sub-tabs">
+      <button class="sub-tab active" onclick="Subs.subtab(this,'tech')">TECHNOLOGY</button>
+      <button class="sub-tab"        onclick="Subs.subtab(this,'devices')">DEVICES</button>
+      <button class="sub-tab"        onclick="Subs.subtab(this,'sunset')">3G SUNSET RISK</button>
+      <button class="sub-tab"        onclick="Subs.subtab(this,'mobility')">MOBILITY</button>
+      <button class="sub-tab"        onclick="Subs.subtab(this,'lookup')">LOOKUP</button>
+    </div>
+    <div id="sub-panel-tech"     class="sub-panel active">
+      <div class="two-chart-row">
+        <div id="sub-tech-pie"   class="chart-box"></div>
+        <div id="sub-tech-bar"   class="chart-box"></div>
+      </div>
+    </div>
+    <div id="sub-panel-devices"  class="sub-panel">
+      <div id="sub-devices-chart" class="chart-box"></div>
+    </div>
+    <div id="sub-panel-sunset"   class="sub-panel">
+      <div id="sub-sunset-chart" class="chart-box"></div>
+      <div class="table-wrap"><table id="sub-sunset-table" class="data-table"><thead><tr>
+        <th>Region</th><th>At Risk (3G)</th><th>Easy Fix (VoLTE)</th><th>Needs Upgrade</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div id="sub-panel-mobility" class="sub-panel">
+      <div class="two-chart-row">
+        <div id="sub-mob-count" class="chart-box"></div>
+        <div id="sub-mob-dou"   class="chart-box"></div>
+      </div>
+    </div>
+    <div id="sub-panel-lookup"   class="sub-panel">
+      <div class="lookup-row">
+        <input id="sub-msisdn" type="text" class="sb-input" placeholder="Enter MSISDN...">
+        <button class="btn-primary" onclick="Subs.lookup()">LOOKUP</button>
+      </div>
+      <div id="sub-lookup-result"></div>
+    </div>
+  </div>
+
+  <!-- ── COMMERCIAL TAB ── -->
+  <div class="tab-panel" data-tab="commercial">
+    <div class="filter-row">
+      <select id="com-segment" onchange="Com.load()" class="filter-sel">
+        <option value="All">All Segments</option>
+        <option value="prepaid">Prepaid</option><option value="postpaid">Postpaid</option>
+      </select>
+    </div>
+    <div class="com-tabs">
+      <button class="com-tab active" onclick="Com.subtab(this,'arpu')">ARPU & SEGMENTS</button>
+      <button class="com-tab"        onclick="Com.subtab(this,'plans')">PLANS</button>
+      <button class="com-tab"        onclick="Com.subtab(this,'billing')">BILLING</button>
+      <button class="com-tab"        onclick="Com.subtab(this,'hvc')">HVC LIST</button>
+    </div>
+    <div id="com-panel-arpu"    class="com-panel active">
+      <div class="two-chart-row">
+        <div id="com-seg-chart"  class="chart-box"></div>
+        <div id="com-arpu-trend" class="chart-box"></div>
+      </div>
+    </div>
+    <div id="com-panel-plans"   class="com-panel">
+      <div class="two-chart-row">
+        <div id="com-plans-bar" class="chart-box"></div>
+        <div id="com-plans-pie" class="chart-box"></div>
+      </div>
+      <div class="table-wrap"><table id="com-plans-table" class="data-table"><thead><tr>
+        <th>Plan</th><th>Type</th><th>Price TND</th><th>Data GB</th><th>5G</th><th>VoLTE</th><th>Subscribers</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div id="com-panel-billing" class="com-panel">
+      <div id="com-billing-chart" class="chart-box"></div>
+      <div class="table-wrap"><table id="com-billing-table" class="data-table"><thead><tr>
+        <th>Month</th><th>Billed TND</th><th>Paid TND</th><th>Unpaid TND</th><th>Unpaid Subs</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div id="com-panel-hvc"     class="com-panel">
+      <div class="table-wrap"><table id="com-hvc-table" class="data-table"><thead><tr>
+        <th>MSISDN</th><th>Segment</th><th>ARPU</th><th>Plan</th><th>5G Plan</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+  </div>
+
+  <!-- ── CAMPAIGNS TAB ── -->
+  <div class="tab-panel" data-tab="campaigns">
+    <div class="camp-tabs">
+      <button class="camp-tab active" onclick="Camp.subtab(this,'opps')">OPPORTUNITIES</button>
+      <button class="camp-tab"        onclick="Camp.subtab(this,'active')">ACTIVE CAMPAIGNS</button>
+      <button class="camp-tab"        onclick="Camp.subtab(this,'offers')">OFFERS CATALOGUE</button>
+    </div>
+    <div id="camp-panel-opps"   class="camp-panel active">
+      <div id="camp-opps-cards" class="opps-grid"></div>
+      <div id="camp-opps-chart" class="chart-box" style="height:260px"></div>
+    </div>
+    <div id="camp-panel-active" class="camp-panel">
+      <div id="camp-active-list"></div>
+    </div>
+    <div id="camp-panel-offers" class="camp-panel">
+      <div id="camp-offers-grid" class="offers-grid"></div>
+    </div>
+  </div>
+
+</main>
+
+<script src="/static/js/charts.js?v=2"></script>
+<script src="/static/js/strategy_diagram.js"></script>
+<script src="/static/js/mindmap.js?v=3"></script>
+<script src="/static/js/ws.js"></script>
+<script src="/static/js/chat.js?v=3"></script>
+<script src="/static/js/network.js"></script>
+<script src="/static/js/subscribers.js"></script>
+<script src="/static/js/commercial.js"></script>
+<script src="/static/js/campaigns.js"></script>
+<script src="/static/js/main.js?v=3"></script>
+</body>
+</html>

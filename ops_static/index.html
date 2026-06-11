@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NetworkAnalyzer — Ops Portal</title>
+<link rel="stylesheet" href="/static/ops.css" />
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <span class="logo-icon">⬡</span>
+    <div>
+      <div class="logo-title">NetworkAnalyzer</div>
+      <div class="logo-sub">Ops Portal</div>
+    </div>
+  </div>
+  <nav>
+    <a class="nav-item active" data-tab="campaigns"     href="#">
+      <span class="nav-icon">📋</span> Campaigns
+      <span class="badge" id="badge-campaigns"></span>
+    </a>
+    <a class="nav-item" data-tab="sms"          href="#">
+      <span class="nav-icon">💬</span> SMS Queue
+      <span class="badge" id="badge-sms"></span>
+    </a>
+    <a class="nav-item" data-tab="subscribers"  href="#">
+      <span class="nav-icon">👥</span> Subscribers
+    </a>
+    <a class="nav-item" data-tab="network"      href="#">
+      <span class="nav-icon">📡</span> Network
+      <span class="badge" id="badge-network_flag"></span>
+    </a>
+    <a class="nav-item" data-tab="reports"      href="#">
+      <span class="nav-icon">📊</span> Reports
+    </a>
+    <a class="nav-item" data-tab="audit"        href="#">
+      <span class="nav-icon">🕓</span> Audit Log
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="http://localhost:8000" target="_blank" class="chat-link">↗ Open Chat</a>
+  </div>
+</aside>
+
+<main class="main">
+  <!-- CAMPAIGNS -->
+  <section class="tab active" id="tab-campaigns">
+    <div class="tab-header">
+      <h2>Campaigns</h2>
+      <div class="tab-actions">
+        <select id="camp-status-filter" onchange="loadCampaigns()">
+          <option value="">All</option>
+          <option value="pending" selected>Pending</option>
+          <option value="approved">Approved</option>
+          <option value="denied">Denied</option>
+        </select>
+      </div>
+    </div>
+    <div id="campaigns-list" class="card-list"></div>
+  </section>
+
+  <!-- SMS QUEUE -->
+  <section class="tab" id="tab-sms">
+    <div class="tab-header">
+      <h2>SMS Queue</h2>
+      <div class="tab-actions">
+        <select id="sms-status-filter" onchange="loadSMS()">
+          <option value="">All</option>
+          <option value="pending" selected>Pending</option>
+          <option value="approved">Approved</option>
+          <option value="denied">Denied</option>
+        </select>
+      </div>
+    </div>
+    <div id="sms-list" class="card-list"></div>
+  </section>
+
+  <!-- SUBSCRIBERS -->
+  <section class="tab" id="tab-subscribers">
+    <div class="tab-header">
+      <h2>Subscribers</h2>
+      <div class="tab-actions">
+        <input type="text" id="sub-region" placeholder="Region" oninput="debounceSubscribers()" />
+        <select id="sub-tech" onchange="loadSubscribers()">
+          <option value="">All Technologies</option>
+          <option value="3G">3G</option>
+          <option value="4G">4G</option>
+          <option value="5G">5G</option>
+        </select>
+        <select id="sub-segment" onchange="loadSubscribers()">
+          <option value="">All Segments</option>
+          <option value="bronze">Bronze</option>
+          <option value="silver">Silver</option>
+          <option value="gold">Gold</option>
+          <option value="platinum">Platinum</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="subscribers-table">
+        <thead>
+          <tr>
+            <th>MSISDN</th><th>Region</th><th>Technology</th>
+            <th>Segment</th><th>ARPU</th><th>Churn Risk</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="subscribers-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- NETWORK -->
+  <section class="tab" id="tab-network">
+    <div class="tab-header">
+      <h2>Network</h2>
+    </div>
+    <h3 class="section-label">Agent Flags <span class="label-hint">— flagged by agent for field attention</span></h3>
+    <div id="network-flags-list" class="card-list"></div>
+    <h3 class="section-label" style="margin-top:2rem;">Worst KPIs Today</h3>
+    <div class="table-wrap">
+      <table id="kpi-table">
+        <thead>
+          <tr><th>Cell</th><th>Region</th><th>Drop Rate</th><th>Throughput</th><th>Latency</th></tr>
+        </thead>
+        <tbody id="kpi-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- REPORTS -->
+  <section class="tab" id="tab-reports">
+    <div class="tab-header"><h2>Reports</h2></div>
+    <div id="reports-list" class="card-list"></div>
+  </section>
+
+  <!-- AUDIT LOG -->
+  <section class="tab" id="tab-audit">
+    <div class="tab-header"><h2>Audit Log</h2></div>
+    <div class="table-wrap">
+      <table id="audit-table">
+        <thead>
+          <tr><th>ID</th><th>Type</th><th>Title</th><th>Status</th><th>Created</th><th>Resolved</th><th>Note</th></tr>
+        </thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- RESOLVE MODAL -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <h3 id="modal-title"></h3>
+    <p id="modal-summary"></p>
+    <div class="modal-payload" id="modal-payload"></div>
+    <div id="modal-sms-wrap" style="display:none">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">SMS Message (editable)</label>
+      <textarea id="modal-sms-message" rows="4" placeholder="Draft SMS message..."></textarea>
+    </div>
+    <textarea id="modal-note" placeholder="Note (optional)..." rows="3"></textarea>
+    <div class="modal-buttons">
+      <button id="modal-download" class="btn btn-review" style="display:none">⬇ Download CSV</button>
+      <button class="btn-approve" onclick="resolveAction('approved')">✓ Approve</button>
+      <button class="btn-deny"    onclick="resolveAction('denied')">✗ Deny</button>
+      <button class="btn-cancel"  onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/ops.js"></script>
+</body>
+</html>

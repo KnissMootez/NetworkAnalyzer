@@ -1,0 +1,494 @@
+==DOC==
+title: HVC 3G subscribers with high churn in poor-network regions
+tags: hvc 3g churn risk drop rate region network quality cross-db complex
+question: Find HVC subscribers on 3G with churn risk above medium in regions where drop rate exceeds network average, ranked by ARPU
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; WITH region_drop AS (SELECT si.region, AVG(k.dropped_call_rate) AS avg_drop FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites si ON c.site_id=si.site_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) GROUP BY si.region), net_avg AS (SELECT AVG(dropped_call_rate) AS avg FROM kpis_daily WHERE date=(SELECT MAX(date) FROM kpis_daily)) SELECT cv.msisdn, cv.arpu, cv.churn_risk_score, cv.churn_label, s.region, st.current_technology, ROUND(rd.avg_drop,4) AS region_drop_rate FROM op.customer_value cv JOIN subscribers s ON cv.msisdn=s.msisdn JOIN subscriber_technology st ON cv.msisdn=st.msisdn JOIN region_drop rd ON s.region=rd.region CROSS JOIN net_avg na WHERE cv.month=(SELECT MAX(month) FROM op.customer_value) AND cv.is_hvc=1 AND st.current_technology='3G' AND cv.churn_label IN ('medium','high') AND rd.avg_drop > na.avg ORDER BY cv.arpu DESC
+note: ALWAYS go kpis_daily→cells→sites to get region. Column is dropped_call_rate not drop_rate. churn_label values are 'low','medium','high'. Use churn_label IN ('medium','high') for above-medium risk.
+==END==
+
+==DOC==
+title: Region-level network KPI averages (drop rate, throughput, latency by region)
+tags: region drop rate throughput latency network quality average kpi per region
+question: What is the average drop rate per region? Which regions have the worst network quality?
+db: SC
+sql: SELECT si.region, ROUND(AVG(k.dropped_call_rate),4) AS avg_drop_rate, ROUND(AVG(k.dl_throughput_mbps),2) AS avg_throughput, ROUND(AVG(k.latency_ms),1) AS avg_latency, COUNT(DISTINCT k.cell_id) AS cells FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites si ON c.site_id=si.site_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) GROUP BY si.region ORDER BY avg_drop_rate DESC
+note: kpis_daily has NO region column. Always join kpis_daily→cells→sites to aggregate by region. Column is dropped_call_rate not drop_rate.
+==END==
+
+==DOC==
+title: Network KPI data ranges and thresholds
+tags: rsrp sinr threshold poor signal kpi range data values network quality
+question: What are the actual KPI value ranges in the network data?
+db: SC
+sql: SELECT MIN(rsrp_avg) as rsrp_min, MAX(rsrp_avg) as rsrp_max, ROUND(AVG(rsrp_avg),1) as rsrp_avg, MIN(sinr_avg) as sinr_min, MAX(sinr_avg) as sinr_max, MIN(dl_throughput_mbps) as dl_min, MAX(dl_throughput_mbps) as dl_max FROM kpis_daily WHERE date=(SELECT MAX(date) FROM kpis_daily)
+note: RSRP overall ranges -104 to -68 dBm, but subscriber cells only range -92 to -68 dBm. CRITICAL: use rsrp_avg < -85 for poor signal on subscribers (gives ~6k results). NEVER use -95 or lower — it returns 0 rows for any subscriber query. Good signal = rsrp_avg > -75.
+==END==
+
+==DOC==
+title: HVC status and ARPU breakdown by segment
+tags: hvc high-value customer arpu breakdown status segment gold platinum
+question: HVC customer status and ARPU breakdown
+db: OP
+sql: SELECT cv.value_segment, COUNT(DISTINCT cv.msisdn) as hvc_count, ROUND(AVG(cv.arpu),2) as avg_arpu, ROUND(MIN(cv.arpu),2) as min_arpu, ROUND(MAX(cv.arpu),2) as max_arpu FROM customer_value cv WHERE cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM customer_value) GROUP BY cv.value_segment ORDER BY avg_arpu DESC
+==END==
+
+==DOC==
+title: HVC count latest month
+tags: hvc high-value customer count
+question: How many high-value customers do we have?
+db: OP
+sql: SELECT COUNT(*) as hvc_count FROM customer_value cv WHERE cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM customer_value)
+==END==
+
+==DOC==
+title: HVC by segment
+tags: hvc segment prepaid postpaid enterprise breakdown
+question: Break down high-value customers by segment (prepaid/postpaid/enterprise)
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT op.customers.segment, COUNT(*) as hvc_count FROM op.customer_value cv JOIN op.customers ON cv.msisdn=op.customers.msisdn WHERE cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY op.customers.segment ORDER BY hvc_count DESC
+==END==
+
+==DOC==
+title: HVC by region
+tags: hvc region breakdown distribution
+question: How many high-value customers are in each region?
+db: OP
+sql: SELECT c.region, COUNT(*) as hvc_count FROM customer_value cv JOIN customers c ON cv.msisdn=c.msisdn WHERE cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM customer_value) GROUP BY c.region ORDER BY hvc_count DESC
+==END==
+
+==DOC==
+title: Average ARPU of HVC customers
+tags: hvc arpu average revenue
+question: What is the average ARPU of high-value customers?
+db: OP
+sql: SELECT ROUND(AVG(cv.arpu),2) as avg_arpu FROM customer_value cv WHERE cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM customer_value)
+==END==
+
+==DOC==
+title: ARPU by value segment
+tags: arpu value segment bronze silver gold platinum
+question: What is the average ARPU per value segment?
+db: OP
+sql: SELECT cv.value_segment, ROUND(AVG(cv.arpu),2) as avg_arpu, COUNT(*) as count FROM customer_value cv WHERE cv.month=(SELECT MAX(month) FROM customer_value) GROUP BY cv.value_segment ORDER BY avg_arpu DESC
+==END==
+
+==DOC==
+title: Revenue by region — best and worst performing regions
+tags: revenue region arpu worst best low high performing total income
+question: Which regions have the highest or lowest revenue? What are the worst regions in terms of revenue?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, ROUND(SUM(cv.arpu),0) AS total_arpu, COUNT(DISTINCT cv.msisdn) AS subscribers, ROUND(AVG(cv.arpu),2) AS avg_arpu FROM op.customer_value cv JOIN subscribers s ON cv.msisdn=s.msisdn WHERE cv.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY total_arpu ASC
+note: Always filter customer_value by MAX(month) — it has 6 rows per subscriber so without the filter totals are 6x too high. ORDER BY total_arpu ASC gives worst (lowest) first, DESC gives best first. Use subscribers column to separate low-revenue-due-to-low-count vs genuinely low ARPU regions.
+==END==
+
+==DOC==
+title: HVC not on 5G plan
+tags: hvc 5g plan upsell opportunity
+question: How many high-value customers are not on a 5G plan?
+db: OP
+sql: SELECT COUNT(*) as n FROM customer_value cv JOIN subscriptions s ON cv.msisdn=s.msisdn AND s.is_current=1 JOIN plans p ON s.plan_id=p.plan_id WHERE cv.is_hvc=1 AND p.supports_5g=0 AND cv.month=(SELECT MAX(month) FROM customer_value)
+==END==
+
+==DOC==
+title: Top ARPU customers
+tags: arpu top customers ranking
+question: Who are the top 20 customers by ARPU?
+db: OP
+sql: SELECT cv.msisdn, c.full_name, cv.arpu, cv.value_segment FROM customer_value cv JOIN customers c ON cv.msisdn=c.msisdn WHERE cv.month=(SELECT MAX(month) FROM customer_value) ORDER BY cv.arpu DESC LIMIT 20
+==END==
+
+==DOC==
+title: FWA candidates count latest month
+tags: fwa fixed wireless access candidates count
+question: How many FWA candidates do we have?
+db: SC
+sql: SELECT COUNT(*) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
+==END==
+
+==DOC==
+title: FWA candidates by region
+tags: fwa candidates region breakdown
+question: How many FWA candidates are there per region?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) GROUP BY s.region ORDER BY n DESC
+==END==
+
+==DOC==
+title: FWA candidates revenue potential by region
+tags: fwa candidates revenue potential arpu region breakdown convert conversion commercial
+question: What is the revenue potential of FWA candidates broken down by region?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_revenue_potential FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY total_revenue_potential DESC
+==END==
+
+==DOC==
+title: FWA candidates overall summary with ARPU
+tags: fwa candidates total count arpu overall summary convert conversion
+question: Give me an overall summary of FWA conversion candidates with their ARPU
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as total_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_monthly_revenue FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value)
+==END==
+
+==DOC==
+title: FWA candidates not on FWA plan
+tags: fwa candidates plan upsell
+question: How many FWA candidates are not subscribed to an FWA plan?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0
+==END==
+
+==DOC==
+title: FWA candidates average data usage
+tags: fwa data usage average monthly
+question: What is the average monthly data usage of FWA candidates?
+db: SC
+sql: SELECT ROUND(AVG(dm.total_data_gb),2) as avg_data_gb FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
+==END==
+
+==DOC==
+title: 5G upsell candidates count
+tags: 5g upsell candidates capable not on 5g
+question: How many subscribers can be upsold to 5G?
+db: SC
+sql: SELECT COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.is_5g_capable=1 AND st.current_technology='4G' AND EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn AND cv.technology_available='5G')
+==END==
+
+==DOC==
+title: 5G upsell candidates by region
+tags: 5g upsell region breakdown candidates
+question: How many 5G upsell candidates are there per region?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.is_5g_capable=1 AND st.current_technology='4G' AND EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn AND cv.technology_available='5G') GROUP BY s.region ORDER BY n DESC
+==END==
+
+==DOC==
+title: 5G capable subscribers not on 5G by region
+tags: 5g capable not using 5g region
+question: Which regions have the most 5G-capable devices not using 5G?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT d.msisdn) as n FROM devices d JOIN subscriber_technology st ON d.msisdn=st.msisdn JOIN subscribers s ON d.msisdn=s.msisdn WHERE d.is_5g_capable=1 AND st.current_technology != '5G' GROUP BY s.region ORDER BY n DESC
+==END==
+
+==DOC==
+title: 5G coverage availability
+tags: 5g coverage cells sites active
+question: How many active 5G cells and sites do we have?
+db: SC
+sql: SELECT COUNT(DISTINCT c.cell_id) as cells_5g, COUNT(DISTINCT c.site_id) as sites_5g FROM cells c WHERE c.technology='5G' AND c.is_active=1
+==END==
+
+==DOC==
+title: 5G network KPIs latest day
+tags: 5g kpi throughput latency performance
+question: What are the average KPIs for 5G cells today?
+db: SC
+sql: SELECT ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl, ROUND(AVG(k.ul_throughput_mbps),2) as avg_ul, ROUND(AVG(k.latency_ms),2) as avg_latency, ROUND(AVG(k.availability_pct),2) as availability FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id WHERE c.technology='5G' AND k.date=(SELECT MAX(date) FROM kpis_daily)
+==END==
+
+==DOC==
+title: 3G sunset risk count
+tags: 3g sunset migration risk volte
+question: How many subscribers are at risk from 3G sunset?
+db: SC
+sql: SELECT COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE st.current_technology='3G' AND (d.volte_capable=0 OR st.volte_active=0)
+==END==
+
+==DOC==
+title: 3G sunset risk by region
+tags: 3g sunset region breakdown migration
+question: How many 3G sunset-risk subscribers are there per region?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE (d.volte_capable=0 AND st.current_technology='3G') OR (d.volte_capable=1 AND st.current_technology='3G' AND st.volte_active=0) GROUP BY s.region ORDER BY n DESC
+==END==
+
+==DOC==
+title: VoLTE capable but on 3G count
+tags: volte capable 3g sunset migration ready
+question: How many subscribers have VoLTE-capable devices but are still on 3G?
+db: SC
+sql: SELECT COUNT(*) as n FROM devices d JOIN subscriber_technology st ON d.msisdn=st.msisdn WHERE d.volte_capable=1 AND st.current_technology='3G' AND st.volte_active=0
+==END==
+
+==DOC==
+title: VoLTE active subscribers by region
+tags: volte active region breakdown
+question: How many subscribers have VoLTE active per region?
+db: SC
+sql: SELECT s.region, COUNT(*) as volte_active FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE st.volte_active=1 GROUP BY s.region ORDER BY volte_active DESC
+==END==
+
+==DOC==
+title: 3G subscribers with non-VoLTE devices
+tags: 3g volte device capability sunset
+question: How many 3G subscribers have devices that are not VoLTE capable?
+db: SC
+sql: SELECT COUNT(*) as n FROM devices d JOIN subscriber_technology st ON d.msisdn=st.msisdn WHERE d.volte_capable=0 AND st.current_technology='3G'
+==END==
+
+==DOC==
+title: KPI trends by region latest day
+tags: kpi region throughput availability drop rate
+question: What are the network KPIs for each region today?
+db: SC
+sql: SELECT s.region, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl, ROUND(AVG(k.availability_pct),2) as availability, ROUND(AVG(k.dropped_call_rate),3) as drop_rate FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) GROUP BY s.region ORDER BY avg_dl DESC
+==END==
+
+==DOC==
+title: KPI trend over last 30 days for a region
+tags: kpi trend time series region throughput
+question: Show downlink throughput trend over the last 30 days in Sfax
+db: SC
+sql: SELECT k.date, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE s.region='Sfax' AND k.date >= date('now','-30 days') GROUP BY k.date ORDER BY k.date
+==END==
+
+==DOC==
+title: KPI by technology latest day
+tags: kpi technology 2g 3g 4g 5g throughput performance
+question: What are the average download speeds per technology?
+db: SC
+sql: SELECT c.technology, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl, ROUND(AVG(k.availability_pct),2) as availability FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) GROUP BY c.technology ORDER BY c.technology
+==END==
+
+==DOC==
+title: KPI by zone (North/Center/South)
+tags: kpi zone north center south throughput
+question: What are the network KPIs by zone (North, Center, South)?
+db: SC
+sql: SELECT s.zone, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl, ROUND(AVG(k.availability_pct),2) as availability, ROUND(AVG(k.dropped_call_rate),3) as drop_rate FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) GROUP BY s.zone ORDER BY s.zone
+==END==
+
+==DOC==
+title: Worst performing cells by drop rate
+tags: kpi drop rate worst cells performance degraded
+question: Which cells have the highest dropped call rate?
+db: SC
+sql: SELECT k.cell_id, s.site_name, s.region, c.technology, ROUND(k.dropped_call_rate,4) as drop_rate FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) ORDER BY k.dropped_call_rate DESC LIMIT 20
+==END==
+
+==DOC==
+title: KPI trend southern zone last 30 days
+tags: kpi trend south zone throughput time series
+question: Show the downlink throughput trend in the south zone over the last 30 days
+db: SC
+sql: SELECT k.date, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE s.zone='South' AND k.date >= date('now','-30 days') GROUP BY k.date ORDER BY k.date
+==END==
+
+==DOC==
+title: Subscriber count by region
+tags: subscriber region breakdown count distribution
+question: How many subscribers are there in each region?
+db: SC
+sql: SELECT s.region, COUNT(*) as total FROM subscribers s WHERE s.is_active=1 GROUP BY s.region ORDER BY total DESC
+==END==
+
+==DOC==
+title: Subscriber breakdown by current technology
+tags: subscriber technology 2g 3g 4g 5g distribution
+question: How many subscribers are on each technology (2G/3G/4G/5G)?
+db: SC
+sql: SELECT st.current_technology, COUNT(*) as n FROM subscriber_technology st JOIN subscribers s ON st.msisdn=s.msisdn WHERE s.is_active=1 GROUP BY st.current_technology ORDER BY st.current_technology
+==END==
+
+==DOC==
+title: Subscriber by region and technology
+tags: subscriber region technology breakdown heatmap
+question: Show subscriber count by region and current technology
+db: SC
+sql: SELECT s.region, st.current_technology, COUNT(*) as n FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE s.is_active=1 GROUP BY s.region, st.current_technology ORDER BY s.region, st.current_technology
+==END==
+
+==DOC==
+title: Device brand distribution
+tags: device brand distribution count subscribers
+question: What are the most common device brands among subscribers?
+db: SC
+sql: SELECT d.brand, COUNT(*) as n FROM devices d JOIN subscribers s ON d.msisdn=s.msisdn WHERE s.is_active=1 GROUP BY d.brand ORDER BY n DESC LIMIT 20
+==END==
+
+==DOC==
+title: Critical active network alarms
+tags: network alarm critical active count
+question: How many critical network alarms are currently active?
+db: SC
+sql: SELECT COUNT(*) as critical_alarms FROM network_alarms WHERE severity='critical' AND is_active=1
+==END==
+
+==DOC==
+title: Active alarms by severity
+tags: network alarms severity breakdown active
+question: How many active network alarms are there by severity level?
+db: SC
+sql: SELECT severity, COUNT(*) as count FROM network_alarms WHERE is_active=1 GROUP BY severity ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'major' THEN 2 WHEN 'minor' THEN 3 WHEN 'warning' THEN 4 END
+==END==
+
+==DOC==
+title: Active alarms by type and severity
+tags: network alarms type severity breakdown
+question: Show active network alarms grouped by type and severity
+db: SC
+sql: SELECT alarm_type, severity, COUNT(*) as count FROM network_alarms WHERE is_active=1 GROUP BY alarm_type, severity ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'major' THEN 2 WHEN 'minor' THEN 3 WHEN 'warning' THEN 4 END, alarm_type
+==END==
+
+==DOC==
+title: Cells with active critical alarms by region
+tags: network alarms cells region critical
+question: Which regions have the most cells with critical alarms?
+db: SC
+sql: SELECT si.region, COUNT(DISTINCT na.cell_id) as cells_with_alarms FROM network_alarms na JOIN cells c ON na.cell_id=c.cell_id JOIN sites si ON c.site_id=si.site_id WHERE na.severity='critical' AND na.is_active=1 GROUP BY si.region ORDER BY cells_with_alarms DESC
+==END==
+
+==DOC==
+title: Active campaigns list
+tags: campaign active list
+question: What campaigns are currently active?
+db: OP
+sql: SELECT campaign_id, campaign_name, campaign_type, status FROM campaigns WHERE status='active' ORDER BY campaign_name
+==END==
+
+==DOC==
+title: Active offers with discount
+tags: offer discount active
+question: What active offers are available and what discounts do they offer?
+db: OP
+sql: SELECT o.offer_name, o.discount_pct, c.campaign_name, c.campaign_type FROM offers o JOIN campaigns c ON o.target_campaign=c.campaign_id WHERE o.is_active=1 ORDER BY o.discount_pct DESC
+==END==
+
+==DOC==
+title: HVC with poor network quality by region cross-DB
+tags: hvc network quality rsrp kpi region poor signal cross-db subscriber cell
+question: Which regions have the most high-value customers experiencing poor network quality?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT s.msisdn) as hvc_at_risk, ROUND(AVG(cv.arpu),2) as avg_arpu, ROUND(AVG(k.rsrp_avg),1) as avg_rsrp FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id JOIN op.customer_value cv ON s.msisdn=cv.msisdn WHERE cv.value_segment IN ('gold','platinum') AND cv.month=(SELECT MAX(month) FROM op.customer_value) AND k.date=(SELECT MAX(date) FROM kpis_daily) AND k.rsrp_avg < -85 GROUP BY s.region ORDER BY avg_rsrp ASC
+==END==
+
+==DOC==
+title: Subscribers on congested cells by region
+tags: congestion subscriber region cell network quality kpi
+question: Which regions have the most subscribers currently on congested cells?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT s.msisdn) as affected_subscribers, ROUND(AVG(k.congestion_level),2) as avg_congestion FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id WHERE k.congestion_level > 0.8 AND k.date=(SELECT MAX(date) FROM kpis_daily) AND s.is_active=1 GROUP BY s.region ORDER BY affected_subscribers DESC
+==END==
+
+==DOC==
+title: Subscribers experiencing high latency on current cell
+tags: latency subscriber kpi network quality poor experience
+question: How many subscribers are currently on cells with high latency?
+db: SC
+sql: SELECT COUNT(DISTINCT s.msisdn) as n, ROUND(AVG(k.latency_ms),1) as avg_latency FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id WHERE k.latency_ms > 80 AND k.date=(SELECT MAX(date) FROM kpis_daily) AND s.is_active=1
+==END==
+
+==DOC==
+title: Subscribers on poor network cells by region and technology
+tags: rsrp signal poor subscriber region technology kpi network
+question: How many subscribers per region are on cells with poor signal quality, broken down by technology?
+db: SC
+sql: SELECT s.region, c.technology, COUNT(DISTINCT s.msisdn) as affected FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id JOIN cells c ON st.current_cell_id=c.cell_id WHERE k.rsrp_avg < -85 AND k.date=(SELECT MAX(date) FROM kpis_daily) AND s.is_active=1 GROUP BY s.region, c.technology ORDER BY s.region, c.technology
+==END==
+
+==DOC==
+title: HVC on cells with active critical alarms cross-DB
+tags: hvc alarm critical network quality subscriber cross-db
+question: How many high-value customers are currently connected to cells with active critical alarms?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT s.msisdn) as hvc_at_risk FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN network_alarms na ON st.current_cell_id=na.cell_id JOIN op.customer_value cv ON s.msisdn=cv.msisdn WHERE na.severity='critical' AND na.is_active=1 AND cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) AND s.is_active=1
+==END==
+
+==DOC==
+title: HVC on cells with active alarms by region cross-DB
+tags: hvc alarm critical region network quality at-risk cross-db
+question: Which regions have the most HVC subscribers on cells with active alarms?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT s.msisdn) as hvc_at_risk FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN network_alarms na ON st.current_cell_id=na.cell_id JOIN op.customer_value cv ON s.msisdn=cv.msisdn WHERE na.is_active=1 AND cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) AND s.is_active=1 GROUP BY s.region ORDER BY hvc_at_risk DESC
+==END==
+
+==DOC==
+title: Average QoE score by region latest day
+tags: qoe quality experience region subscriber network
+question: What is the average quality of experience score per region?
+db: SC
+sql: SELECT s.region, ROUND(AVG(q.qoe_score),2) as avg_qoe, COUNT(DISTINCT q.msisdn) as subscribers FROM qoe_daily q JOIN subscribers s ON q.msisdn=s.msisdn WHERE q.date=(SELECT MAX(date) FROM qoe_daily) GROUP BY s.region ORDER BY avg_qoe ASC
+==END==
+
+==DOC==
+title: HVC with poor QoE by region cross-DB
+tags: hvc qoe quality experience poor cross-db region
+question: Which regions have the most high-value customers with poor quality of experience?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT s.msisdn) as hvc_poor_qoe, ROUND(AVG(q.qoe_score),2) as avg_qoe, ROUND(AVG(cv.arpu),2) as avg_arpu FROM subscribers s JOIN qoe_daily q ON s.msisdn=q.msisdn JOIN op.customer_value cv ON s.msisdn=cv.msisdn WHERE q.qoe_score < 3 AND q.date=(SELECT MAX(date) FROM qoe_daily) AND cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY hvc_poor_qoe DESC
+==END==
+
+==DOC==
+title: Subscribers affected by active network incidents
+tags: network incident subscriber impacted region outage
+question: How many subscribers are currently affected by active network incidents?
+db: SC
+sql: SELECT ni.incident_type, ni.severity, s.region, COUNT(DISTINCT s.msisdn) as affected_subscribers FROM network_incidents ni JOIN cells c ON ni.cell_id=c.cell_id JOIN subscriber_technology st ON c.cell_id=st.current_cell_id JOIN subscribers s ON st.msisdn=s.msisdn WHERE ni.is_active=1 AND s.is_active=1 GROUP BY ni.incident_type, ni.severity, s.region ORDER BY affected_subscribers DESC
+==END==
+
+==DOC==
+title: High data users on slow cells cross-DB
+tags: data usage throughput slow cell subscriber dou kpi
+question: How many heavy data users are on cells with below-average download speeds?
+db: SC
+sql: SELECT s.region, COUNT(DISTINCT s.msisdn) as heavy_users_on_slow_cells, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id JOIN dou_monthly dm ON s.msisdn=dm.msisdn WHERE k.dl_throughput_mbps < 10 AND k.date=(SELECT MAX(date) FROM kpis_daily) AND dm.total_data_gb > 20 AND dm.month=(SELECT MAX(month) FROM dou_monthly) AND s.is_active=1 GROUP BY s.region ORDER BY heavy_users_on_slow_cells DESC
+==END==
+
+==DOC==
+title: Subscriber network quality summary on current cell
+tags: subscriber kpi rsrp latency throughput current cell quality
+question: What is the average network quality experienced by active subscribers on their current cell?
+db: SC
+sql: SELECT ROUND(AVG(k.rsrp_avg),1) as avg_rsrp, ROUND(AVG(k.sinr_avg),1) as avg_sinr, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl, ROUND(AVG(k.latency_ms),1) as avg_latency, ROUND(AVG(k.dropped_call_rate),4) as avg_drop_rate FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id WHERE k.date=(SELECT MAX(date) FROM kpis_daily) AND s.is_active=1
+==END==
+
+==DOC==
+title: HVC on best plan by region cross-DB
+tags: hvc plan region cross-db subscribers
+question: How many HVC subscribers in each region are on a plan that supports 5G?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT cv.msisdn) as hvc_5g_plan FROM op.customer_value cv JOIN op.subscriptions sub ON cv.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id JOIN subscribers s ON cv.msisdn=s.msisdn WHERE cv.is_hvc=1 AND p.supports_5g=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY hvc_5g_plan DESC
+==END==
+
+==DOC==
+title: FWA candidates not on FWA plan by region cross-DB
+tags: fwa candidates plan region cross-db upsell
+question: Show FWA candidates who are not on an FWA plan, broken down by region
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_gap FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0 GROUP BY s.region ORDER BY fwa_gap DESC
+==END==
+
+==DOC==
+title: 5G upsell HVC with coverage cross-DB
+tags: 5g upsell hvc coverage cross-db
+question: How many HVC subscribers have 5G-capable devices with 5G coverage but are not yet on 5G?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN op.customer_value cv ON s.msisdn=cv.msisdn WHERE d.is_5g_capable=1 AND st.current_technology='4G' AND cv.is_hvc=1 AND cv.month=(SELECT MAX(month) FROM op.customer_value) AND EXISTS(SELECT 1 FROM coverage cov WHERE cov.msisdn=s.msisdn AND cov.technology_available='5G')
+==END==
+
+==DOC==
+title: 5G upsell opportunity — 4G subscribers with 5G device not on 5G plan
+tags: 5g upsell device plan capability mismatch subscriber region cross-db
+question: How many subscribers are on 4G with a 5G-capable device but not on a 5G plan, by region?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(*) as n, ROUND(AVG(p.monthly_price),2) as avg_plan_price FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN op.subscriptions sub ON s.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE d.is_5g_capable=1 AND st.current_technology='4G' AND p.supports_5g=0 GROUP BY s.region ORDER BY n DESC
+note: ALWAYS join subscriptions first (with is_current=1), then plans. Never join plans directly without subscriptions — causes cross-join inflation. Filter p.supports_5g=0 to exclude subscribers already on 5G plans.
+==END==
+
+==DOC==
+title: Device-plan capability mismatch by technology tier
+tags: device plan mismatch 4g 3g capability upsell cross-db
+question: Which subscribers have a device capable of a higher technology than their current plan supports?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, SUM(CASE WHEN d.max_technology='5G' AND p.supports_5g=0 THEN 1 ELSE 0 END) as g5_device_no_5g_plan, SUM(CASE WHEN d.max_technology='4G' AND st.current_technology='3G' THEN 1 ELSE 0 END) as g4_device_on_3g, ROUND(AVG(p.monthly_price),2) as avg_plan_price FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN op.subscriptions sub ON s.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id GROUP BY s.region ORDER BY g5_device_no_5g_plan DESC
+note: Use CASE WHEN for each mismatch type. Always go through subscriptions (is_current=1) before plans.
+==END==
+
+==DOC==
+title: Churn risk — high data users who dropped usage (month-over-month from dou_monthly)
+tags: churn risk data usage drop decline trend monthly dou_monthly high low users plan
+question: Identify subscribers who were high data users 3 months ago but low usage last month
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; WITH last_mo AS (SELECT msisdn, total_data_gb FROM dou_monthly WHERE month=(SELECT MAX(month) FROM dou_monthly)), three_mo_ago AS (SELECT msisdn, total_data_gb FROM dou_monthly WHERE month=(SELECT month FROM (SELECT DISTINCT month FROM dou_monthly ORDER BY month DESC LIMIT 1 OFFSET 2) t)) SELECT s.region, COUNT(DISTINCT t.msisdn) as churn_risk_count, ROUND(AVG(t.total_data_gb),1) as avg_usage_3mo_ago, ROUND(AVG(l.total_data_gb),1) as avg_usage_last_mo, GROUP_CONCAT(DISTINCT p.plan_name) as plans FROM three_mo_ago t JOIN last_mo l ON t.msisdn=l.msisdn AND t.total_data_gb > 30 AND l.total_data_gb < 10 JOIN subscribers s ON t.msisdn=s.msisdn JOIN op.subscriptions sub ON t.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id GROUP BY s.region ORDER BY churn_risk_count DESC
+note: Use WITH CTEs to isolate each month's data first, then JOIN on msisdn. dou_monthly is in SC DB; plans/subscriptions are in op DB — always use QUERY_BOTH with ATTACH. NEVER use subscriber_technology for usage — it has no usage columns.
+==END==

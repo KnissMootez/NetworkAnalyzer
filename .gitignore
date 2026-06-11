@@ -1,0 +1,29 @@
+# Secrets — NEVER commit (AWS keys live here)
+.env
+
+# Python
+__pycache__/
+*.pyc
+networkanalyzer-env/
+
+# Databases (4.9 GB + 188 MB) and SQLite sidecar files
+*.db
+*.db-shm
+*.db-wal
+
+# Generated / cache
+.data_profile_cache.txt
+media/
+
+# Old files and data dumps
+archive/
+exports/
+export*.csv
+*.zip
+*.csv.gz
+
+# Confidential documents (real Huawei KPI/financial PDFs)
+*.pdf
+
+# Downloaded external project
+odysseus/

@@ -1,0 +1,339 @@
+{
+  "tables": {
+    "subscribers": {
+      "db": "sc",
+      "pk": "msisdn",
+      "tags": ["subscriber", "region", "city", "nation", "demographics", "active", "area", "customer"],
+      "key_columns": ["msisdn", "region", "city", "nation", "area_code", "is_active", "activation_date", "age", "gender"],
+      "always_filter": [],
+      "notes": "Region is Title Case. NO technology columns here. Use subscriber_technology for current tech."
+    },
+    "devices": {
+      "db": "sc",
+      "pk": "msisdn",
+      "tags": ["device", "5g", "volte", "vowifi", "capability", "brand", "model", "os", "phone"],
+      "key_columns": ["msisdn", "brand", "model", "max_technology", "is_5g_capable", "volte_capable", "vowifi_capable", "os"],
+      "always_filter": [],
+      "notes": "is_5g_capable=1 means device has 5G hardware. volte_capable=1 means device supports VoLTE."
+    },
+    "subscriber_technology": {
+      "db": "sc",
+      "pk": "msisdn",
+      "tags": ["technology", "current tech", "3g", "4g", "5g", "2g", "volte", "roaming", "current cell"],
+      "key_columns": ["msisdn", "current_technology", "current_cell_id", "volte_active", "data_roaming_active", "last_seen_date"],
+      "always_filter": [],
+      "notes": "Use current_technology for subscriber tech. current_cell_id links to kpis_daily for subscriber cell KPIs."
+    },
+    "sites": {
+      "db": "sc",
+      "pk": "site_id",
+      "tags": ["site", "region", "city", "nation", "location", "macro", "indoor", "fwa"],
+      "key_columns": ["site_id", "site_name", "region", "city", "nation", "zone", "site_type", "is_active"],
+      "always_filter": [],
+      "notes": "zone is nation-level: 'Earth Kingdom','Fire Nation','Water Tribe','Air Nomads'. region is city-level: 'Ba Sing Se', 'Omashu', etc."
+    },
+    "cells": {
+      "db": "sc",
+      "pk": "cell_id",
+      "tags": ["cell", "technology", "4g", "5g", "3g", "2g", "frequency", "band"],
+      "key_columns": ["cell_id", "site_id", "technology", "frequency_band", "is_active", "max_users"],
+      "always_filter": [],
+      "notes": "technology column here is for network infrastructure. Use this to filter KPIs by technology (NOT kpis_daily). NO msisdn column."
+    },
+    "kpis_daily": {
+      "db": "sc",
+      "pk": ["cell_id", "date"],
+      "tags": ["kpi", "throughput", "drop rate", "availability", "latency", "signal", "rsrp", "sinr", "congestion", "performance", "network quality"],
+      "key_columns": ["cell_id", "date", "rsrp_avg", "sinr_avg", "dl_throughput_mbps", "ul_throughput_mbps", "dropped_call_rate", "availability_pct", "latency_ms", "congestion_level", "active_users_avg"],
+      "always_filter": ["k.date=(SELECT MAX(date) FROM kpis_daily)"],
+      "notes": "NO msisdn column. NO technology column. Filter technology via JOIN cells. Filter region via JOIN cells→sites. dropped_call_rate is the correct column (NOT drop_rate)."
+    },
+    "coverage": {
+      "db": "sc",
+      "pk": ["msisdn", "cell_id"],
+      "tags": ["coverage", "signal strength", "technology available", "5g coverage", "4g coverage"],
+      "key_columns": ["msisdn", "cell_id", "technology_available", "signal_strength_dbm", "is_home_coverage"],
+      "always_filter": [],
+      "notes": "MANDATORY for upsell queries: verify technology actually available at subscriber location."
+    },
+    "network_alarms": {
+      "db": "sc",
+      "pk": "alarm_id",
+      "tags": ["alarm", "fault", "outage", "congestion", "interference", "backhaul", "power", "hardware"],
+      "key_columns": ["alarm_id", "cell_id", "alarm_type", "severity", "trigger_time", "clear_time", "is_active"],
+      "always_filter": ["a.is_active=1"],
+      "notes": "is_active=1 for open alarms. Joins to cells→sites for location."
+    },
+    "dou_monthly": {
+      "db": "sc",
+      "pk": ["msisdn", "month"],
+      "tags": ["data usage", "dou", "monthly data", "gb", "usage", "data consumption"],
+      "key_columns": ["msisdn", "month", "total_data_gb", "distinct_cells_used", "primary_cell_id", "days_active"],
+      "always_filter": ["dm.month=(SELECT MAX(month) FROM dou_monthly)"],
+      "notes": "Multiple rows per subscriber (one per month). Always filter to latest month."
+    },
+    "mobility_profile": {
+      "db": "sc",
+      "pk": ["msisdn", "month"],
+      "tags": ["mobility", "fwa", "stationary", "home cell", "movement", "fwa candidate"],
+      "key_columns": ["msisdn", "month", "distinct_cells_count", "avg_daily_cells", "mobility_class", "is_fwa_candidate", "is_home_cell_user"],
+      "always_filter": ["mp.month=(SELECT MAX(month) FROM mobility_profile)"],
+      "notes": "is_fwa_candidate=1 already computed. mobility_class: stationary/low/medium/high."
+    },
+    "qoe_daily": {
+      "db": "sc",
+      "pk": ["msisdn", "date", "app_type"],
+      "tags": ["qoe", "quality of experience", "gaming", "video", "voip", "latency", "experience", "poor experience"],
+      "key_columns": ["msisdn", "date", "app_type", "avg_latency_ms", "avg_throughput_mbps", "experience_score", "experience_label"],
+      "always_filter": ["q.date=(SELECT MAX(date) FROM qoe_daily)"],
+      "notes": "app_type: gaming/video/voip/web/social. experience_label: poor/fair/good/excellent."
+    },
+    "customers": {
+      "db": "op",
+      "pk": "msisdn",
+      "tags": ["customer", "commercial", "segment", "prepaid", "postpaid", "enterprise"],
+      "key_columns": ["msisdn", "full_name", "segment", "is_active", "registration_date"],
+      "always_filter": [],
+      "notes": "NO region column. Get region from subscribers.region in SC DB. segment: prepaid/postpaid/enterprise."
+    },
+    "subscriptions": {
+      "db": "op",
+      "pk": ["msisdn", "plan_id"],
+      "tags": ["subscription", "plan", "current plan", "active plan", "contract"],
+      "key_columns": ["msisdn", "plan_id", "start_date", "end_date", "is_current", "contract_type"],
+      "always_filter": ["sub.is_current=1"],
+      "notes": "ALWAYS filter is_current=1. Multiple rows per subscriber (plan history). Bridge table to plans."
+    },
+    "plans": {
+      "db": "op",
+      "pk": "plan_id",
+      "tags": ["plan", "price", "data cap", "5g plan", "fwa plan", "bundle", "monthly price"],
+      "key_columns": ["plan_id", "plan_name", "plan_type", "data_cap_gb", "speed_mbps", "monthly_price", "supports_5g", "is_fwa_plan"],
+      "always_filter": [],
+      "notes": "supports_5g=1 means plan ALLOWS 5G but subscriber may not be using it yet."
+    },
+    "customer_value": {
+      "db": "op",
+      "pk": ["msisdn", "month"],
+      "tags": ["arpu", "hvc", "high value", "churn", "churn risk", "value segment", "platinum", "gold", "silver", "bronze", "commercial value", "revenue"],
+      "key_columns": ["msisdn", "month", "arpu", "value_segment", "is_hvc", "churn_risk_score", "churn_label"],
+      "always_filter": ["cv.month=(SELECT MAX(month) FROM customer_value)"],
+      "notes": "6 rows per subscriber (monthly history). ALWAYS filter to MAX(month). is_hvc=1 for HVC. value_segment: bronze/silver/gold/platinum. churn_label: low/medium/high."
+    },
+    "billing": {
+      "db": "op",
+      "pk": ["msisdn", "billing_month"],
+      "tags": ["billing", "revenue", "payment", "charges", "amount"],
+      "key_columns": ["msisdn", "billing_month", "total_amount", "data_charges", "voice_charges", "payment_status"],
+      "always_filter": ["b.billing_month=(SELECT MAX(billing_month) FROM billing)"],
+      "notes": "NO region column. JOIN subscribers for region. One row per subscriber per month."
+    },
+    "offers": {
+      "db": "op",
+      "pk": "offer_id",
+      "tags": ["offer", "campaign", "discount", "upsell", "promotion", "5g offer", "fwa offer"],
+      "key_columns": ["offer_id", "offer_name", "target_campaign", "target_technology", "discount_pct", "bonus_data_gb", "is_active"],
+      "always_filter": ["is_active=1"],
+      "notes": "target_campaign: HVC_upsell/3G_migration/5G_upsell/FWA/VoLTE_sunset."
+    }
+  },
+
+  "relationships": [
+    {
+      "from": "kpis_daily", "to": "cells",
+      "on": "k.cell_id=c.cell_id",
+      "join": "JOIN cells c ON k.cell_id=c.cell_id",
+      "purpose": "Get technology or site for KPI rows"
+    },
+    {
+      "from": "cells", "to": "sites",
+      "on": "c.site_id=si.site_id",
+      "join": "JOIN sites si ON c.site_id=si.site_id",
+      "purpose": "Get region, city, or nation for cells"
+    },
+    {
+      "from": "network_alarms", "to": "cells",
+      "on": "a.cell_id=c.cell_id",
+      "join": "JOIN cells c ON c.cell_id=a.cell_id",
+      "purpose": "Get technology or site for alarms"
+    },
+    {
+      "from": "subscribers", "to": "devices",
+      "on": "s.msisdn=d.msisdn",
+      "join": "JOIN devices d ON s.msisdn=d.msisdn",
+      "purpose": "Get device capability (5G, VoLTE)"
+    },
+    {
+      "from": "subscribers", "to": "subscriber_technology",
+      "on": "s.msisdn=st.msisdn",
+      "join": "JOIN subscriber_technology st ON s.msisdn=st.msisdn",
+      "purpose": "Get current technology subscriber is on"
+    },
+    {
+      "from": "subscribers", "to": "coverage",
+      "on": "s.msisdn=cov.msisdn",
+      "join": "JOIN coverage cov ON s.msisdn=cov.msisdn AND cov.technology_available='5G'",
+      "purpose": "Verify technology available at subscriber location"
+    },
+    {
+      "from": "subscriber_technology", "to": "kpis_daily",
+      "on": "st.current_cell_id=k.cell_id",
+      "join": "JOIN kpis_daily k ON st.current_cell_id=k.cell_id AND k.date=(SELECT MAX(date) FROM kpis_daily)",
+      "purpose": "Get KPI metrics for a subscriber's current cell"
+    },
+    {
+      "from": "subscribers", "to": "dou_monthly",
+      "on": "s.msisdn=dm.msisdn",
+      "join": "JOIN dou_monthly dm ON s.msisdn=dm.msisdn AND dm.month=(SELECT MAX(month) FROM dou_monthly)",
+      "purpose": "Get subscriber data usage"
+    },
+    {
+      "from": "subscribers", "to": "mobility_profile",
+      "on": "s.msisdn=mp.msisdn",
+      "join": "JOIN mobility_profile mp ON s.msisdn=mp.msisdn AND mp.month=(SELECT MAX(month) FROM mobility_profile)",
+      "purpose": "Get subscriber mobility class or FWA candidate flag"
+    },
+    {
+      "from": "subscribers", "to": "qoe_daily",
+      "on": "s.msisdn=q.msisdn",
+      "join": "JOIN qoe_daily q ON s.msisdn=q.msisdn AND q.date=(SELECT MAX(date) FROM qoe_daily)",
+      "purpose": "Get subscriber quality of experience"
+    },
+    {
+      "from": "customers", "to": "subscriptions",
+      "on": "c.msisdn=sub.msisdn",
+      "join": "JOIN subscriptions sub ON c.msisdn=sub.msisdn AND sub.is_current=1",
+      "purpose": "Get current plan for a customer"
+    },
+    {
+      "from": "subscriptions", "to": "plans",
+      "on": "sub.plan_id=p.plan_id",
+      "join": "JOIN plans p ON sub.plan_id=p.plan_id",
+      "purpose": "Get plan details (price, 5G support, FWA)"
+    },
+    {
+      "from": "subscribers", "to": "customer_value",
+      "on": "s.msisdn=cv.msisdn",
+      "join": "JOIN op.customer_value cv ON s.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM op.customer_value)",
+      "purpose": "Get ARPU, HVC status, churn risk for a subscriber",
+      "requires_attach": true
+    },
+    {
+      "from": "subscribers", "to": "billing",
+      "on": "s.msisdn=b.msisdn",
+      "join": "JOIN op.billing b ON s.msisdn=b.msisdn AND b.billing_month=(SELECT MAX(billing_month) FROM op.billing)",
+      "purpose": "Get billing amount or payment status for a subscriber",
+      "requires_attach": true
+    }
+  ],
+
+  "join_paths": {
+    "kpi_by_region": {
+      "description": "KPI averages broken down by region",
+      "tags": ["kpi", "region", "throughput", "drop rate", "availability", "latency", "network quality by region"],
+      "tables": ["kpis_daily", "cells", "sites"],
+      "sql_pattern": "kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites si ON c.site_id=si.site_id",
+      "filter": "WHERE k.date=(SELECT MAX(date) FROM kpis_daily)",
+      "group_by": "GROUP BY si.region"
+    },
+    "kpi_by_technology": {
+      "description": "KPI averages broken down by technology (2G/3G/4G/5G)",
+      "tags": ["kpi", "technology", "4g performance", "5g performance", "3g performance"],
+      "tables": ["kpis_daily", "cells"],
+      "sql_pattern": "kpis_daily k JOIN cells c ON k.cell_id=c.cell_id",
+      "filter": "WHERE k.date=(SELECT MAX(date) FROM kpis_daily)",
+      "group_by": "GROUP BY c.technology"
+    },
+    "subscriber_cell_kpi": {
+      "description": "Get KPI metrics for a subscriber's current cell",
+      "tags": ["subscriber kpi", "individual subscriber", "signal quality", "poor signal", "subscriber performance"],
+      "tables": ["subscribers", "subscriber_technology", "kpis_daily"],
+      "sql_pattern": "subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id",
+      "filter": "AND k.date=(SELECT MAX(date) FROM kpis_daily)"
+    },
+    "upsell_5g": {
+      "description": "Find 5G upsell candidates: device capable + in 5G coverage area",
+      "tags": ["5g upsell", "upsell", "5g capable", "5g candidate", "not on 5g", "upgrade to 5g"],
+      "tables": ["subscribers", "devices", "subscriber_technology", "coverage"],
+      "sql_pattern": "subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn",
+      "filter": "WHERE d.is_5g_capable=1 AND st.current_technology != '5G' AND EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn AND cv.technology_available='5G')"
+    },
+    "hvc_with_network": {
+      "description": "HVC subscribers with their network quality data",
+      "tags": ["hvc", "high value", "churn", "arpu", "network quality", "cross domain", "commercial network"],
+      "tables": ["subscribers", "subscriber_technology", "kpis_daily", "customer_value"],
+      "sql_pattern": "subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn JOIN kpis_daily k ON st.current_cell_id=k.cell_id AND k.date=(SELECT MAX(date) FROM kpis_daily) JOIN op.customer_value cv ON s.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM op.customer_value)",
+      "requires_attach": true
+    },
+    "subscriber_plan": {
+      "description": "Get a subscriber's current plan details",
+      "tags": ["plan", "subscription", "monthly price", "data cap", "5g plan", "current plan"],
+      "tables": ["subscribers", "subscriptions", "plans"],
+      "sql_pattern": "subscribers s JOIN op.subscriptions sub ON s.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id",
+      "requires_attach": true
+    },
+    "alarm_location": {
+      "description": "Active alarms with their region and technology context",
+      "tags": ["alarm", "fault", "outage", "region alarm", "technology alarm"],
+      "tables": ["network_alarms", "cells", "sites"],
+      "sql_pattern": "network_alarms a JOIN cells c ON c.cell_id=a.cell_id JOIN sites si ON si.site_id=c.site_id",
+      "filter": "WHERE a.is_active=1"
+    },
+    "fwa_candidates": {
+      "description": "FWA candidates by region",
+      "tags": ["fwa", "fixed wireless", "home internet", "stationary", "fwa candidate"],
+      "tables": ["mobility_profile", "subscribers"],
+      "sql_pattern": "mobility_profile mp JOIN subscribers s ON mp.msisdn=s.msisdn",
+      "filter": "WHERE mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile)"
+    },
+    "churn_risk": {
+      "description": "Churn risk subscribers with their ARPU and value segment",
+      "tags": ["churn", "churn risk", "at risk", "churn label", "medium churn", "high churn", "churn_label"],
+      "tables": ["customer_value"],
+      "sql_pattern": "customer_value cv",
+      "filter": "WHERE cv.month=(SELECT MAX(month) FROM customer_value) AND cv.churn_label IN ('medium','high')"
+    },
+    "revenue_by_region": {
+      "description": "Total revenue or ARPU by region — requires cross-DB join",
+      "tags": ["revenue", "arpu by region", "revenue by region", "commercial region", "income"],
+      "tables": ["subscribers", "customer_value"],
+      "sql_pattern": "subscribers s JOIN op.customer_value cv ON s.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM op.customer_value)",
+      "group_by": "GROUP BY s.region",
+      "requires_attach": true
+    }
+  },
+
+  "constraints": {
+    "kpis_daily": "ALWAYS filter: k.date=(SELECT MAX(date) FROM kpis_daily) — historical average is misleading",
+    "customer_value": "ALWAYS filter: cv.month=(SELECT MAX(month) FROM customer_value) — 6 rows per subscriber, omitting filter inflates by 6x",
+    "billing": "ALWAYS filter: b.billing_month=(SELECT MAX(billing_month) FROM billing) — one row per subscriber per month",
+    "dou_monthly": "ALWAYS filter: dm.month=(SELECT MAX(month) FROM dou_monthly) — multiple rows per subscriber",
+    "mobility_profile": "ALWAYS filter: mp.month=(SELECT MAX(month) FROM mobility_profile)",
+    "qoe_daily": "ALWAYS filter: q.date=(SELECT MAX(date) FROM qoe_daily)",
+    "subscriptions": "ALWAYS filter: sub.is_current=1 — multiple rows per subscriber (plan history)",
+    "network_alarms": "ALWAYS filter: a.is_active=1 for open alarms",
+    "coverage": "MANDATORY for upsell: verify EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn AND cv.technology_available='5G')"
+  },
+
+  "wrong_columns": {
+    "kpis_daily.drop_rate": "Use dropped_call_rate instead",
+    "kpis_daily.technology": "kpis_daily has NO technology column — filter via JOIN cells c ON k.cell_id=c.cell_id WHERE c.technology='5G'",
+    "kpis_daily.region": "kpis_daily has NO region column — go through JOIN cells c ON k.cell_id=c.cell_id JOIN sites si ON c.site_id=si.site_id",
+    "cells.msisdn": "cells has NO msisdn column — cells joins via cell_id only",
+    "subscribers.technology": "subscribers has NO technology column — use subscriber_technology.current_technology",
+    "subscribers.phone_number": "Use msisdn instead",
+    "subscribers.subscription_date": "Use activation_date instead",
+    "customers.region": "op.customers has NO region column — JOIN subscribers s ON s.msisdn=c.msisdn for region",
+    "billing.region": "op.billing has NO region column — JOIN subscribers s ON s.msisdn=b.msisdn for region",
+    "subscriber_technology.monthly_data_usage": "No such column — use dou_monthly.total_data_gb for usage",
+    "plans.msisdn": "plans has NO msisdn — always join through subscriptions: JOIN subscriptions sub ON s.msisdn=sub.msisdn AND sub.is_current=1 JOIN plans p ON sub.plan_id=p.plan_id"
+  },
+
+  "cross_db": {
+    "note": "NetworkAnalyzer (SC) and Operator (OP) share msisdn as the join key",
+    "attach_syntax": "ATTACH DATABASE 'operator_new.db' AS op;",
+    "op_prefix": "Always prefix operator tables with 'op.' when using ATTACH",
+    "query_function": "Cross-DB queries use QUERY_BOTH and run via query_sc() with ATTACH",
+    "pure_op_queries": "If query only touches operator tables, use QUERY_OP directly (no ATTACH needed)"
+  }
+}

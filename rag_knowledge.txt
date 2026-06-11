@@ -1,0 +1,367 @@
+==DOC==
+title: Cellular Network Generations
+tags: 2g 3g 4g 5g technology generation migration spectrum
+
+2G (GSM, launched 1991): Digital voice and SMS. Data via GPRS (~171 kbps) and EDGE (~384 kbps). Latency 300-600ms. Circuit-switched voice. Very low data speeds, no modern app support.
+
+3G (UMTS, early 2000s): Enabled mobile broadband. HSPA+ peak ~42 Mbps theoretical, 1-14 Mbps real-world. Latency 100-200ms. Still circuit-switched voice. Insufficient for HD streaming.
+
+4G LTE (2009): First all-IP packet-switched generation. HD video, VoLTE, IoT. Peak 100 Mbps-1 Gbps. Latency 20-50ms. Capacity constraints in dense areas.
+
+5G NR (2019): Peak 10-20 Gbps theoretical, ~270 Mbps real-world. Latency 1-10ms. Network slicing, massive IoT, URLLC. mmWave has short range, full SA deployment still uneven.
+
+Why operators migrate: Older generations use spectrum inefficiently. Shutting down 2G/3G frees low-band and mid-band spectrum for 4G/5G refarming, reduces cost of maintaining parallel networks, improves capacity.
+
+Backward compatibility: A 5G device works on 4G and 3G networks. A 3G device cannot use 4G or 5G. A 4G device without VoLTE loses voice when 3G shuts down.
+==END==
+
+==DOC==
+title: VoLTE and Circuit-Switched Fallback
+tags: volte voice lte 4g csfb circuit switched fallback 3g sunset voice calls
+
+VoLTE (Voice over LTE): Delivers voice as IP packets over 4G LTE using IMS framework. Replaces circuit-switched voice used on 2G/3G. Benefits: HD voice quality, faster call setup (1-2s vs 3-5s), simultaneous voice and high-speed data.
+
+Circuit-Switched Fallback (CSFB): Before VoLTE, 4G devices dropped to 3G/2G to make voice calls, then returned to 4G after. CSFB depends entirely on 2G/3G network availability.
+
+3G sunset impact on non-VoLTE 4G devices: When 3G shuts down, CSFB stops working. A 4G device WITHOUT VoLTE support retains LTE data but LOSES voice and SMS capability entirely — including emergency calls. This is a critical service disruption risk.
+
+VoLTE device requirements: Requires both hardware support in the device AND carrier-side IMS provisioning. Not all 4G phones support VoLTE. Support is carrier-specific.
+
+Identifying at-risk subscribers: A subscriber with a VoLTE-capable device currently on 3G is ready to migrate to 4G with VoLTE active. A subscriber with a non-VoLTE 4G device needs a device upgrade before 3G sunset. A subscriber on 3G with a VoLTE-capable device who has VoLTE inactive needs to be migrated and provisioned.
+==END==
+
+==DOC==
+title: FWA Fixed Wireless Access vs MBB Mobile Broadband
+tags: fwa fixed wireless access mbb mobile broadband home internet cpe stationary high dou
+
+FWA (Fixed Wireless Access): Uses cellular network (4G/5G) to deliver home broadband via a CPE router at a fixed location. Alternative to fiber/DSL/cable for last-mile connectivity. Subscriber is stationary.
+
+MBB (Mobile Broadband): Traditional mobile data on smartphones/tablets used while moving. Variable usage, spread across many cells.
+
+Key difference: FWA generates 200-600+ GB/month from 1-2 cells. MBB generates 10-50 GB/month spread across many cells as the user moves.
+
+Identifying FWA candidates from mobile subscribers:
+- High DOU (total_data_gb > 30 GB/month consistently)
+- Low mobility (distinct_cells_used <= 3 per month — subscriber barely moves)
+- Currently on MBB or standard mobile plan, NOT on a dedicated FWA plan
+- Consistently connects through same primary cell (home cell pattern)
+These subscribers are using mobile as de facto home internet. Converting them to FWA is better for them (lower cost, higher speeds) and better for the operator (frees mobile capacity, higher ARPU on FWA tariff).
+
+FWA revenue impact: FWA plans typically generate 1.5-2x the ARPU of standard mobile plans because they replace home broadband rather than supplementing it.
+==END==
+
+==DOC==
+title: Device Capability vs Network Coverage Alignment
+tags: device capability coverage 5g 4g 3g alignment upgrade upsell terminal
+
+Both device AND coverage must support a technology for an upgrade to work.
+
+Device capability: Determined by chipset hardware. Cannot be upgraded via software. A 4G device cannot become 5G. Device max_technology field indicates the highest technology the device supports.
+
+Network coverage: Whether the operator has deployed a given technology at the subscriber's location. Stored in coverage table as technology_available per cell per subscriber.
+
+The alignment rule:
+- 5G upsell requires: device.is_5g_capable=1 AND coverage includes 5G AND current plan does not support 5G
+- 4G migration requires: device.max_technology IN (4G,5G) AND coverage includes 4G AND subscriber currently on 3G
+- No point promoting 5G to a subscriber whose area has no 5G coverage
+- No point promoting 4G to a subscriber whose device maxes out at 3G
+
+Band compatibility: A device may support 5G but not the operator's specific 5G bands. This is an edge case but relevant for precise targeting.
+
+Operator strategy: Only subscribers at the intersection of device capability AND coverage availability are real upgrade candidates. All others require either device upgrade or network expansion first.
+==END==
+
+==DOC==
+title: DOU Data Volume per User
+tags: dou data usage gb monthly consumption plan fit upsell heavy user light user
+
+DOU (Data Volume per User): Average data consumed per subscriber per month, measured in GB. Core metric for plan optimization, network planning, and segmentation.
+
+Interpreting DOU:
+- < 2 GB/month: Light user. Feature phone, elderly, or primarily on Wi-Fi. May be overpaying for plan.
+- 2-10 GB/month: Moderate user. Social media, occasional streaming.
+- 10-30 GB/month: Heavy mobile user. Regular video streaming, app usage.
+- 30-100 GB/month: Very heavy. Likely tethering or using mobile as home internet substitute.
+- 100+ GB/month: FWA-level consumption. Almost certainly using mobile as home broadband.
+
+Plan fit implications:
+- DOU consistently exceeding plan allowance: upsell to higher tier
+- DOU far below plan allowance: subscriber perceiving poor value, churn risk, candidate for right-sizing
+- DOU growing month over month: proactive upsell opportunity
+
+5G effect: 5G subscribers consume 2-3x more data than equivalent 4G subscribers due to faster speeds enabling higher-quality content.
+
+Global averages (2025-2026): Smartphone average ~21-25 GB/month. 5G users ~50-70 GB/month. FWA subscribers ~300-600 GB/month.
+==END==
+
+==DOC==
+title: Mobility Patterns and CDR Analysis
+tags: mobility cdr cell count stationary mobile distinct cells home cell fwa
+
+CDR (Call Detail Record): Network event log generated each time a subscriber makes a call, sends SMS, or uses data. Contains: subscriber identifier (MSISDN), cell ID, timestamp, duration, and data volume.
+
+Mobility metric — distinct cell count: Number of unique cells a subscriber connects through per month. Derived by counting distinct cell_id values in CDR records per subscriber per period.
+
+Mobility classes:
+- Stationary (1-2 distinct cells/month): Subscriber barely moves. Uses network from fixed location. Strong FWA signal.
+- Low mobility (3-5 cells/month): Limited movement, possibly commuting short distances.
+- Medium mobility (5-15 cells/month): Normal urban commuter pattern.
+- High mobility (15+ cells/month): Frequent traveler, field worker, or commuter across wide areas.
+
+Home cell identification: The cell_id most frequently associated with a subscriber's nighttime activity (10pm-6am) is their home cell. This is their primary location.
+
+FWA signal combination: high DOU + stationary mobility class + consistent primary cell = subscriber using mobile as home internet substitute.
+
+Network planning use: Mobility data identifies where subscribers spend time, enabling targeted capacity upgrades and coverage improvement in high-demand areas.
+==END==
+
+==DOC==
+title: ARPU and Customer Value Segmentation
+tags: arpu average revenue per user hvc high value customer segment gold platinum bronze silver
+
+ARPU (Average Revenue Per User): Total service revenue divided by subscriber count for a period. Primary revenue efficiency metric.
+
+Calculation: ARPU = Total Revenue / Average Subscribers (monthly)
+
+Typical ranges (2025-2026):
+- Developed markets postpaid: $30-55/month
+- Developing markets: $3-10/month
+- Prepaid always lower than postpaid due to no contract commitment
+
+Customer value segments (typical operator tiers):
+- Platinum: Top 5% by ARPU. Highest revenue contributors. Maximum retention priority.
+- Gold: Top 5-20% by ARPU. High value, worth proactive retention and upsell.
+- Silver: Middle 20-50%. Growth potential through upsell.
+- Bronze: Bottom 50%. Low ARPU, high churn risk, cost-sensitive.
+
+HVC (High Value Customer): Typically platinum + gold tiers. These subscribers warrant premium treatment: priority care, proactive offers, network quality assurance. Losing an HVC has 5-10x the revenue impact of losing a bronze customer.
+
+ARPU and DOU together: Revenue per GB = ARPU / DOU. Low revenue-per-GB with high DOU indicates a subscriber consuming significant network resources at low yield — upgrade or FWA conversion opportunity.
+
+CLV (Customer Lifetime Value): ARPU / Monthly Churn Rate. A subscriber paying 50 TND/month with 1% monthly churn has CLV of 5000 TND.
+==END==
+
+==DOC==
+title: Network KPIs RSRP SINR Throughput Availability Drop Rate Latency
+tags: kpi rsrp sinr throughput availability drop rate latency network quality performance
+
+RSRP (Reference Signal Received Power): Signal strength from serving cell, in dBm.
+- Excellent: > -80 dBm
+- Good: -80 to -90 dBm
+- Fair: -90 to -100 dBm
+- Poor: -100 to -120 dBm
+- No service: < -120 dBm
+Low RSRP = coverage problem. Subscriber experiences drops and disconnections.
+
+SINR (Signal to Interference plus Noise Ratio): Signal quality, in dB.
+- Excellent: > 20 dB
+- Good: 13-20 dB
+- Fair: 0-13 dB
+- Poor: < 0 dB
+Low SINR = interference problem. Even strong signal can deliver poor speeds if SINR is low.
+
+Throughput: Actual delivered data speed in Mbps.
+- 4G typical real-world: 20-100 Mbps downlink
+- 5G sub-6 GHz: 100-300 Mbps
+- 5G mmWave: up to 1 Gbps
+
+Availability: Percentage of time network is operational. Target: >99.9%. Below 97% is a serious problem requiring immediate investigation.
+
+Drop Rate: Percentage of calls/sessions terminated abnormally. Good: <1%. Poor: >2%. High drop rate directly causes customer complaints and churn.
+
+Latency: Round-trip delay in ms. 4G: 30-50ms. 5G: 10-30ms. High latency degrades VoIP, gaming, video calls.
+
+Combined diagnosis:
+- Low RSRP + Low SINR: Coverage hole, physical obstruction, or antenna issue
+- Good RSRP + Low SINR: Interference problem (neighboring cells, external source)
+- Good RSRP + Good SINR + Low throughput: Congestion or capacity problem
+- High drop rate + Low availability: Hardware fault or backhaul failure
+==END==
+
+==DOC==
+title: 3G Sunset Network Decommissioning
+tags: 3g sunset decommission shutdown spectrum refarming migration at-risk subscribers
+
+3G sunset: Planned shutdown of 3G networks by operators to reclaim spectrum for 4G/5G refarming, reduce dual-network operating costs, and improve efficiency.
+
+Global timeline: US carriers completed 3G shutdown in 2022. Major European operators shut down 3G in 2024-2025. Asia-Pacific operators targeting 2025-2026 completion. Most global operators will complete 3G shutdown by 2027.
+
+Subscribers at risk — three categories:
+1. 3G-only devices (max_technology=3G): Lose ALL service — voice, SMS, data.
+2. 4G devices without VoLTE (volte_capable=0, current_technology=3G or CSFB-dependent): Lose voice and SMS. Retain LTE data only.
+3. IoT/M2M devices on 3G modems: Lose connectivity entirely.
+
+Migration readiness assessment per subscriber:
+- VoLTE capable device + currently on 3G + 4G coverage available = READY to migrate, just needs plan change and VoLTE activation
+- VoLTE capable device + currently on 3G + no 4G coverage = network expansion needed first
+- Non-VoLTE 4G device = device upgrade needed regardless
+- 3G-only device = device upgrade mandatory
+
+Operator actions: Proactive SMS/outreach to at-risk subscribers, subsidized device upgrades, firm migration deadlines, IoT module replacement programs.
+
+Revenue opportunity: 3G sunset migration campaigns drive plan upgrades (3G plans to 4G/5G bundles) and device sales, creating a direct ARPU uplift event.
+==END==
+
+==DOC==
+title: FMC Fixed Mobile Convergence
+tags: fmc fixed mobile convergence bundle quad play cross sell churn reduction arpu
+
+FMC (Fixed Mobile Convergence): Bundling fixed services (broadband, TV, landline) with mobile on a single customer account and bill. Full convergence = quad-play: mobile + fixed broadband + TV + fixed voice.
+
+Why operators pursue FMC:
+- Churn reduction: Converged customers have 40-50% lower churn than standalone subscribers. Higher switching cost and complexity.
+- Higher ARPU: Bundled packages generate more total revenue per household.
+- Competitive defense: Locks customers into integrated ecosystem, defending against MVNOs and pure-play broadband providers.
+
+Identifying FMC opportunities:
+- Mobile-only customers in areas where operator has fixed broadband coverage = cross-sell broadband/TV
+- Fixed broadband/TV customers without mobile lines = add mobile
+- Key data: subscriber address vs fixed network footprint overlap
+
+Bundle discount mechanics: Operators typically offer 10-20% discount to incentivize consolidation. Mobile-to-fixed cross-sell has higher success rate than fixed-to-mobile.
+
+FMC and churn: A customer with both mobile and fixed from the same operator is significantly less likely to churn either service, as canceling one disrupts the other and eliminates bundle discounts.
+==END==
+
+==DOC==
+title: Cell Site and Coverage Topology
+tags: cell site coverage topology sector antenna signal propagation coverage hole
+
+Site: Physical location hosting antenna and radio equipment. One site typically has 3 sectors (tri-sector), each served by a directional panel antenna covering ~120 degrees. Multiple technologies (4G+5G) can coexist on one site.
+
+Cell: Logical radio unit serving one sector on one technology. A 3-sector site with 4G and 5G = 6 cells total. Each cell has a unique Cell ID.
+
+Coverage: Geographic area where signal is usable (RSRP > ~-110 dBm). Depends on:
+- Frequency band: Low bands (700/900 MHz) propagate farther, penetrate buildings better. High bands (3.5 GHz, mmWave) offer higher capacity but shorter range and poor building penetration.
+- Terrain: Hills and buildings block signal.
+- Antenna height and tilt: Higher antennas cover more area. Downtilted antennas reduce interference.
+
+Coverage per subscriber: Determined by mapping subscriber's primary location (home cell from CDR or address) against coverage maps. A subscriber HAS coverage for a technology if their primary location is within that technology's footprint.
+
+Coverage holes: Areas with no or poor signal. Identified by: subscriber complaints from specific cells, low RSRP readings in KPI data, high drop rates localized to specific cells.
+
+Planning implication: Upgrading a cell site to 5G creates 5G coverage for all subscribers whose home cell is that site. This is the network investment decision that directly unlocks 5G upsell opportunities for specific subscriber segments.
+==END==
+
+==DOC==
+title: Telecom Churn Causes and Prevention
+tags: churn retention churn rate voluntary involuntary network quality price competitor
+
+Churn: Rate at which subscribers leave an operator. Expressed as monthly or annual percentage.
+
+Types:
+- Voluntary: Subscriber actively leaves (port-out, cancellation). Requires retention intervention.
+- Involuntary: Terminated for non-payment or fraud. Requires credit management.
+
+Typical rates: Postpaid monthly churn: 0.75-2%. Prepaid: 3-5%+. Top operators achieve <1% postpaid monthly churn.
+
+Primary churn causes in mobile:
+1. Poor network quality: Call drops, slow speeds, coverage gaps. Silent churn — subscriber leaves without complaining.
+2. Price/value perception: Plan cost too high relative to perceived value. Triggered by competitor promotions.
+3. Poor customer service: Unresolved complaints, long wait times, billing errors.
+4. Technology mismatch: Subscriber on outdated technology experiencing degraded service vs. competitors offering 4G/5G. Increasing cause as 3G subscribers experience widening gap.
+5. Plan mismatch: DOU consistently above or below plan allowance. Overpaying customers churn when they notice.
+
+Network-driven churn correlation: Subscribers in cells with RSRP < -100 dBm or drop rate > 2% churn at significantly higher rates. Network investment in these cells directly reduces churn.
+
+Economics: Acquiring a new subscriber costs 5-7x more than retaining one. A 5% retention improvement can increase profits 25-95%.
+
+Prevention tactics: Proactive offers to at-risk segments, network quality improvement in high-churn cells, right-sizing plans, VoLTE migration before 3G sunset, FWA conversion for heavy stationary users.
+==END==
+
+==DOC==
+title: Market ARPU Benchmarks for Operator Comparison (2025-2026)
+tags: arpu benchmark market average revenue per user data voice fwa broadband reference comparison industry
+
+Industry market benchmarks — use these to assess whether our subscribers are above or below the regional average. All values in Yuan.
+
+ARPU benchmarks by service type (regional industry average):
+- Voice mobile (voice-only or voice-dominant plans): ~9 Yuan/month
+- Data smartphone (mobile broadband plans): ~25 Yuan/month
+- Fixed broadband (ADSL equivalent): ~110 Yuan/month
+- FWA (Fixed Wireless Access, 5G home broadband): ~145 Yuan/month
+
+Data consumption benchmarks (industry average):
+- Average mobile data consumption: ~9 GB/subscriber/month
+- Average FWA consumption: ~336 GB/subscriber/month (range 330-390 GB)
+
+Interpretation guide:
+- A subscriber with ARPU in the gold/platinum segment (≥35 Yuan) is above the regional data ARPU average — prioritize retention.
+- A subscriber with DOU > 100 GB/month and ARPU < 110 Yuan may be using mobile as home internet (FWA candidate) at well below market yield.
+- FWA ARPU is ~16x higher than voice ARPU — converting a voice-heavy stationary subscriber to FWA is the single highest-yield conversion available.
+- Revenue per GB benchmark: ~2.8 Yuan/GB on mobile (25 Yuan ÷ 9 GB avg). A subscriber below this ratio is over-consuming relative to revenue — candidate for plan upgrade or FWA conversion.
+==END==
+
+==DOC==
+title: 5G FWA Market Growth Trajectory Post-Launch
+tags: 5g fwa launch growth trajectory market trend subscriber acquisition explosive ramp post-launch
+
+Context: When 5G FWA launches in a market, the growth curve follows a consistent pattern validated across multiple operators.
+
+FWA subscriber growth pattern post-launch:
+- Month 1 (launch): Early adopters ~9,000-10,000 subscribers
+- Month 2: Explosive ramp as word spreads (~25,000+)
+- Month 6: Rapid growth phase, 5-10x launch volume
+- Month 12+: Continued strong growth, 20-30x launch volume, MoM slowing to 7-14%
+- Month 13: Market maturing, growth decelerating to single-digit MoM
+
+FWA consumption per subscriber evolution:
+- Month 1-2 (early adopters, testing): ~175 GB/month
+- Month 2-3 (heavy users arrive): peak ~390 GB/month
+- Stabilized long-term range: 330-370 GB/month
+- This stabilization (~336 GB/month avg) is the expected FWA usage floor — plan design and network capacity must accommodate it
+
+Competitive implication: FWA markets grow at 7-14% MoM in the first 12-18 months post-launch. Any operator that cannot identify and convert FWA-eligible subscribers is losing the highest-ARPU segment to competitors. Stationary subscribers with DOU > 30 GB should be treated as top-priority targets during this window.
+
+Investment context: Operators launching 5G typically spike capex to 25-30% of revenue in the launch year (vs 15-20% in stable years) — confirming that 5G/FWA is the primary growth bet. The network investment directly unlocks the upsell opportunity.
+==END==
+
+==DOC==
+title: Telecom Market Revenue Structure and Trends (2025-2026)
+tags: market share revenue operator benchmark sector revenue competitive trend data voice decline growth
+
+Industry revenue structure benchmarks (regional market, 2025):
+
+Revenue by service type (sector share and trend):
+- Mobile Data: ~34% of sector revenue (+6.8% YoY) — fastest growing, main engine
+- Fixed Data (broadband + FWA): ~33% of sector revenue (+7.8% YoY) — FWA accelerating this
+- Mobile Voice: ~25% of sector revenue (-4.4% YoY) — structurally declining
+- Fixed Voice: ~2% of sector revenue (-19.6% YoY) — near terminal decline
+
+Subscriber penetration benchmarks:
+- Mobile penetration: ~124% (more SIMs than people — dual-SIM devices common)
+- Mobile data penetration: ~73% of mobile base has active data
+- Fixed broadband penetration: ~13% of households (significant upside for FWA)
+
+Strategic read: Voice revenue is declining across every operator in mature markets. Data (mobile + FWA) is growing. A subscriber portfolio still skewed toward voice plans is structurally losing ground. Recommendations should always prioritize migrating voice-dominant subscribers to data-inclusive plans, and data-heavy mobile users to FWA. Operators that win on data win the market.
+==END==
+
+==DOC==
+title: Commercial Decision Benchmarks — ROI Thresholds and Intervention Sizing
+tags: benchmark revenue recommendation threshold commercial kpi revenue per user target upsell churn roi intervention sizing yuan
+
+These benchmarks calibrate the ROI of commercial recommendations. All values in Yuan.
+
+Annual subscriber value by segment (Yuan/year):
+- Voice-only / bronze subscriber: ~110 Yuan/year (~9 Yuan/month)
+- Average data subscriber (silver): ~300 Yuan/year (~25 Yuan/month)
+- Gold subscriber: ~600 Yuan/year (~50 Yuan/month)
+- FWA subscriber: ~1,740 Yuan/year (~145 Yuan/month)
+- Delta from converting a bronze voice subscriber to FWA: ~1,630 Yuan/year — the highest single-step revenue uplift possible
+
+Churn cost framing (annual revenue at risk):
+- Losing a bronze subscriber: ~110 Yuan/year
+- Losing a silver subscriber: ~300 Yuan/year
+- Losing a gold subscriber: ~600 Yuan/year
+- Losing a platinum/FWA subscriber: 1,200-2,000+ Yuan/year
+Retention spend per subscriber should not exceed 2-3 months ARPU for high-value, 1 month ARPU for average.
+
+Upsell campaign ROI template:
+- Target 1,000 FWA candidates → 20% conversion = 200 new FWA subscribers
+- Annual revenue uplift: 200 × 1,740 Yuan = 348,000 Yuan incremental
+- Compare against campaign cost to assess viability
+
+Churn intervention threshold: Intervene proactively on subscribers with ARPU ≥ 25 Yuan/month (silver and above). Below this, intervention ROI is marginal unless subscriber shows ARPU growth trajectory or high DOU suggesting upgrade potential.
+
+Capex efficiency benchmark: A healthy operator invests 15-25% of revenue in network capex in stable years. During a 5G launch year, 26-30% is justified — but only if the FWA subscriber ramp validates the investment.
+==END==

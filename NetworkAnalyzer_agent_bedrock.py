@@ -4210,8 +4210,10 @@ def run_agent(user_input: str) -> dict:
     # query; when one is picked the next message contains it, so we bypass the
     # chooser and run it (prevents an infinite ask loop).
     global _recent_clarify
+    picked_clarify = False
     if any(opt and opt in resolved_input for opt in _recent_clarify):
         _recent_clarify = set()                          # a chosen option → run it directly
+        picked_clarify = True                            # refined ask → full loop, never fast path
     else:
         _clar = _maybe_clarify(resolved_input)
         if _clar:
@@ -4231,11 +4233,15 @@ def run_agent(user_input: str) -> dict:
     # Fast single-shot path for simple metric questions ("how many 5G subs?",
     # "average throughput in X") — skips the full 8-step reasoning loop. Excludes
     # treemap/drilldown questions, which need the richer chain to build hierarchy.
-    _q_low = resolved_input.lower()
+    # Gate on the bare question — resolved_input may carry "Conversation
+    # history:" turns whose words falsely match the simple/complex patterns.
+    # (Short follow-ups were rewritten standalone, so they gate on the rewrite.)
+    _gate_q = resolved_input if (mem_ctx and len(user_input.split()) <= 4) else user_input
+    _q_low = _gate_q.lower()
     _treemapish = any(w in _q_low for w in
                       ("drilldown", "drill down", "drill-down", "tree", "treemap", "hierarchy", "breakdown"))
-    if _is_simple_metric(resolved_input) and not _treemapish:
-        print(f"[FastPath] simple metric — '{resolved_input[:60]}'")
+    if not picked_clarify and _is_simple_metric(_gate_q) and not _treemapish:
+        print(f"[FastPath] simple metric — '{_gate_q[:60]}'")
         result = _fast_query(resolved_input)
         _memory.append({"role": "agent", "summary": _compress(result.get("text", ""))})
         _ans = result.get("text", "")

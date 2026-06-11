@@ -289,7 +289,9 @@ const Chat = (() => {
         b.onclick = () => {
           opts.querySelectorAll(".clarify-btn").forEach(x => x.disabled = true);
           b.classList.add("picked");
-          if (typeof App !== "undefined") App.quickQuery(o.query);
+          // sendSilent: run the refined query without echoing it as a user
+          // bubble — the picked chip is the visible record of the choice
+          if (typeof App !== "undefined") App.sendSilent(o.query);
         };
         opts.appendChild(b);
       });

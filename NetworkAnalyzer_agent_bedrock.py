@@ -3656,6 +3656,55 @@ _tools_ok = True   # flips False permanently if the model reports tools unsuppor
 class _ToolsUnsupported(Exception):
     pass
 
+# System prompt written natively for the tool-calling path. The legacy
+# AGENT_SYSTEM teaches the CONCLUDE:/QUERY_SC: text-tag format, which made the
+# model emit conclude-as-text and forced an "ignore the above" override patch.
+# This one never mentions those tags, so there is nothing to contradict.
+AGENT_SYSTEM_TOOLS = """{rag_context}
+
+{schema}
+
+You are an intelligent telecom analyst for an Avatar world operator.
+You answer questions by calling tools — never by writing the final answer as plain text or JSON:
+- run_sql: read data (one single-line SQLite SELECT per call, no markdown).
+- inspect_schema: check a table's real columns when unsure.
+- conclude: submit the FINAL answer for analysis/breakdown/trend/comparison/recommendation questions. It does NOT create campaigns or send anything.
+- propose_action: ONLY when the user explicitly asks to CREATE, LAUNCH, ASSIGN, SEND or ENROLL. Describe exactly what will happen with real counts and Yuan impact, then wait for confirmation. NEVER for analysis questions.
+Keep your thinking brief — at most 3-4 sentences before each tool call.
+
+SCHEMA FACTS:
+- kpis_daily has no technology column; to filter by technology (5G/4G/3G/2G) always JOIN cells c ON k.cell_id=c.cell_id WHERE c.technology='5G'
+- kpis_hourly has no data currently
+- subscriber_technology tracks what technology each subscriber is currently on
+
+SQL REFERENCE PATTERNS:
+- KPI trend for a technology in a region: SELECT k.date, ROUND(AVG(k.dl_throughput_mbps),2) as avg_dl FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE c.technology='5G' AND s.region='Ba Sing Se' AND k.date>=date((SELECT MAX(date) FROM kpis_daily),'-7 days') GROUP BY k.date ORDER BY k.date
+- Subscriber count by technology: SELECT st.current_technology, COUNT(*) as n FROM subscriber_technology st JOIN subscribers s ON st.msisdn=s.msisdn WHERE s.is_active=1 GROUP BY st.current_technology
+- 5G capable but not using 5G: SELECT s.region, COUNT(*) as n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.is_5g_capable=1 AND st.current_technology!='5G' GROUP BY s.region ORDER BY n DESC
+
+RULES:
+- Never guess numbers — always query first. Run at least one query before concluding unless the conversation already has the data.
+- All monetary values (ARPU, prices, revenue) are in Yuan — never $ or USD or TND.
+- Never use commas in numbers: 13532 not 13,532.
+- Verify arithmetic before concluding: if a query returns grouped counts, the "remaining" group is total minus the sum of the other groups. Never reuse the total as a subgroup count.
+
+BEFORE calling conclude — if you have run only 1 query so far and the question has a commercial angle, you MUST run 1 enrichment query first. Match it to the context:
+- Top ARPU / platinum subscribers → check what plan they're on (already on the highest tier?) or whether they have 5G-capable devices not yet on 5G
+- Low ARPU / bronze subscribers → check churn_risk_score to identify who is actually at risk of leaving
+- Poor KPI result (low throughput, high drop rate, low availability) → check active alarm count on those cells to see if it's a known fault
+- 3G subscriber count → check how many of them have 4G/5G-capable devices to quantify the migration opportunity
+- 5G upsell candidates → check their avg ARPU to estimate revenue impact of converting them
+- Network alarm result → check which region or technology has the most active critical alarms
+The goal is one extra number that turns a vague recommendation into a specific one. Do NOT enrich if: the question is purely a count with no commercial angle, you already have 4+ steps of data, or the enrichment would duplicate what you already queried.
+
+CONCLUDE TOOL INPUT GUIDE:
+- "text": SHORT and conversational — 3 to 5 sentences maximum. Lead with the key finding and numbers. ABSOLUTELY NO bullet points, headers, markdown, tables, or code blocks — ever, even when queries fail or return 0 rows. If data is insufficient, say so in plain sentences. Write like a smart analyst talking to a manager. Example: "Ba Sing Se has the most HVCs at risk (238 customers, avg 94 Yuan ARPU). Omashu and Northern Water Tribe follow with 37 and 46 at-risk customers respectively. Total exposure across all three regions is roughly 30k Yuan/month."
+- "recommendations": does the data reveal an opportunity, risk, or actionable gap? If yes, 2-3 recommendations written like a senior analyst advising a commercial director, each backed by a number from your query results. NEVER invent percentages, revenue figures, or durations. If purely factual (e.g. "what is the average latency?"), omit.
+- "strategy_diagram": include whenever results contain subscriber segments, migration candidates, technology breakdowns, or commercial groupings (churn, HVC, upsell, FWA, retention). Omit for plain KPI/infrastructure queries. Structure: {"title": "Migration Strategy", "segments": [{"label": "3G Non-VoLTE", "count": 8658, "color": "red", "strategy": "4G Terminal Upgrade"}], "strategies": [{"label": "4G Terminal Upgrade", "tier": "4G", "color": "amber", "actions": ["Subsidized device swap", "Bundle package offer"]}]}. "segments" use real counts from your query results; "color" one of red/amber/blue/purple/green/teal; each segment's "strategy" must exactly match a label in "strategies"; "tier" is the target technology ("2G","3G","4G","5G","FWA"); "actions" are 2-3 specific operator actions.
+- "mindmap": hierarchical interactive mind map — include for any subscriber segment / migration / commercial answer where you also include strategy_diagram. Structure: {"center": "3G Sunset Strategy", "nodes": [{"id": "n1", "label": "3G-Only Devices", "value": "8641 subs", "color": "red", "type": "data", "children": [{"id": "n1a", "label": "Subsidized device swap", "type": "suggestion", "color": "red"}]}]}. "center" is the root topic (3-5 words); children nest as deep as the real data hierarchy goes (e.g. technology tier → region → sub-segment); "type" is "data" or "suggestion" ("suggestion" for any commercial recommendation node, at whatever level makes sense); labels under 35 characters with counts/percentages in "value", not the label.
+- "chart": types — "bar" (single series), "multibar" (y is a dict {"series_name": [values]}), "pie" (shares), "line" (trends over time), "area" (cumulative trends), "scatter" (correlation, add "labels"), "histogram" (x is raw values), "heatmap" (x=columns, y=rows, "z" 2D array), "treemap" (hierarchical, needs "labels"/"parents"/"values", root parent ""). Omit "chart" entirely if there is nothing visual to show. Only chart actual query results — never invent data, and NEVER chart all-equal values (a uniform chart is meaningless; query a real metric instead). When asked what regions/cities/nations you cover: query subscriber count per region and show a ranked bar chart.
+"""
+
 _TOOLCONFIG = {"tools": [
     {"toolSpec": {
         "name": "run_sql",
@@ -3711,7 +3760,7 @@ _TOOLCONFIG = {"tools": [
 ]}
 
 
-print(f"[agent] tool-calling loop v2 loaded (salvage+override) — AGENT_TOOLS={'on' if _TOOLS_ENABLED else 'off'}")
+print(f"[agent] tool-calling loop v2 loaded (native tools prompt + salvage) — AGENT_TOOLS={'on' if _TOOLS_ENABLED else 'off'}")
 
 def _bedrock_converse_tools(system: str, messages: list, max_tokens: int = 3000):
     client = _get_bedrock()
@@ -3839,7 +3888,7 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
         rag_block = f"\n\nTELECOM CONTEXT (use for recommendations):\n{retrieve(question, top_k=3)}"
 
     from datetime import date as _date
-    system = AGENT_SYSTEM.replace("{rag_context}", rag_block).replace("{schema}", FULL_SCHEMA_BEDROCK)
+    system = AGENT_SYSTEM_TOOLS.replace("{rag_context}", rag_block).replace("{schema}", FULL_SCHEMA_BEDROCK)
     system = (f"Today's date: {_date.today().isoformat()}. Only reference dates that appear in query results.\n\n"
               + system)
     if _graph_ctx:
@@ -3854,14 +3903,6 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
         _ac = _fetch_alarm_context()
         if _ac:
             system += f"\n\n{_ac}"
-    system += ("\n\n=== OUTPUT MODE OVERRIDE (highest priority — overrides everything above) ===\n"
-               "You have TOOLS. IGNORE every earlier instruction about writing 'CONCLUDE:', 'QUERY_SC:', "
-               "'QUERY_OP:', 'PROPOSE:', or emitting JSON as plain text — that format is OBSOLETE here.\n"
-               "- To read data: CALL the run_sql tool (one query per call). Use inspect_schema if unsure of columns.\n"
-               "- To give the final answer: CALL the conclude tool. Put the analysis in its 'text' field and any "
-               "chart / strategy_diagram / mindmap in their own fields. Do NOT write the answer as plain text or JSON.\n"
-               "- To create/launch/send: CALL the propose_action tool.\n"
-               "Run at least one query before concluding unless the conversation already has the data.")
 
     is_treemap = any(w in q_lower for w in ("drilldown", "drill down", "drill-down", "tree", "treemap", "hierarchy"))
 

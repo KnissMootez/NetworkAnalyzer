@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NetworkAnalyzer — Analytics</title>
+<link rel="stylesheet" href="/static/dashboard.css?v=1" />
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <span class="logo-icon">⬡</span>
+    <div>
+      <div class="logo-title">NetworkAnalyzer</div>
+      <div class="logo-sub">Analytics</div>
+    </div>
+  </div>
+  <nav>
+    <a class="nav-item active" data-sec="network"><span class="nav-icon">📡</span> Network</a>
+    <a class="nav-item" data-sec="subscribers"><span class="nav-icon">👥</span> Subscribers</a>
+    <a class="nav-item" data-sec="commercial"><span class="nav-icon">💰</span> Commercial</a>
+    <a class="nav-item" data-sec="campaigns"><span class="nav-icon">🎯</span> Campaigns</a>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="http://localhost:8000" target="_blank" class="chat-link">↗ Copilot Chat</a><br>
+    <a href="http://localhost:8001" target="_blank" class="chat-link">↗ Ops Portal</a>
+  </div>
+</aside>
+
+<main class="main">
+  <div class="topbar">
+    <h2 id="sec-title">Network</h2>
+    <div class="filters">
+      <label>Region
+        <select id="f-region"><option value="">All</option></select>
+      </label>
+    </div>
+  </div>
+
+  <!-- NETWORK -->
+  <section class="section active" id="sec-network">
+    <div class="kpi-row" id="net-kpis"></div>
+    <div class="grid-2">
+      <div class="panel"><div id="net-dl" class="chart"></div></div>
+      <div class="panel"><div id="net-drop" class="chart"></div></div>
+      <div class="panel"><div id="net-sinr" class="chart"></div></div>
+      <div class="panel"><div id="net-avail" class="chart"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="section-label">Worst cells</span>
+        <select id="net-cell-metric">
+          <option value="drop">By drop rate</option>
+          <option value="throughput">By low throughput</option>
+          <option value="avail">By low availability</option>
+          <option value="latency">By high latency</option>
+          <option value="sinr">By low SINR</option>
+        </select>
+      </div>
+      <div class="table-wrap"><table id="net-cells"></table></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">Active alarms</span>
+      <div class="table-wrap"><table id="net-alarms"></table></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">Recent incidents</span>
+      <div class="table-wrap"><table id="net-incidents"></table></div>
+    </div>
+  </section>
+
+  <!-- SUBSCRIBERS -->
+  <section class="section" id="sec-subscribers">
+    <div class="kpi-row" id="subs-kpis"></div>
+    <div class="grid-2">
+      <div class="panel"><div id="subs-techpie" class="chart"></div></div>
+      <div class="panel"><div id="subs-techbar" class="chart"></div></div>
+    </div>
+    <div class="panel"><div id="subs-techregion" class="chart"></div></div>
+    <div class="grid-2">
+      <div class="panel"><div id="subs-devices" class="chart"></div></div>
+      <div class="panel"><div id="subs-mobility" class="chart"></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><div id="subs-dou" class="chart"></div></div>
+      <div class="panel"><div id="subs-sunset" class="chart"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="section-label">Subscriber lookup</span>
+        <input id="subs-lookup-input" placeholder="Enter MSISDN…" />
+      </div>
+      <div id="subs-lookup-result" class="lookup-result"></div>
+    </div>
+  </section>
+
+  <!-- COMMERCIAL -->
+  <section class="section" id="sec-commercial">
+    <div class="kpi-row" id="com-kpis"></div>
+    <div class="grid-2">
+      <div class="panel"><div id="com-segbar" class="chart"></div></div>
+      <div class="panel"><div id="com-segpie" class="chart"></div></div>
+    </div>
+    <div class="panel"><div id="com-trend" class="chart"></div></div>
+    <div class="grid-2">
+      <div class="panel"><div id="com-plans" class="chart"></div></div>
+      <div class="panel"><div id="com-billing" class="chart"></div></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">Top high-value customers</span>
+      <div class="table-wrap"><table id="com-hvc"></table></div>
+    </div>
+  </section>
+
+  <!-- CAMPAIGNS -->
+  <section class="section" id="sec-campaigns">
+    <div class="kpi-row" id="camp-kpis"></div>
+    <div class="panel"><div id="camp-opp" class="chart"></div></div>
+    <div class="grid-2" id="camp-opp-cards"></div>
+    <div class="panel">
+      <span class="section-label">Campaigns</span>
+      <div id="camp-list"></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">SMS feedback — delivery &amp; response funnel</span>
+      <div class="table-wrap"><table id="camp-funnel"></table></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">Latest replies</span>
+      <div id="camp-replies" class="replies"></div>
+    </div>
+    <div class="panel">
+      <span class="section-label">Offers catalogue</span>
+      <div class="grid-2" id="camp-offers"></div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/dashboard.js?v=1"></script>
+</body>
+</html>

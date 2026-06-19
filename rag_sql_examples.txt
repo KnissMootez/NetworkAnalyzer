@@ -492,3 +492,30 @@ db: BOTH
 sql: ATTACH DATABASE 'operator_new.db' AS op; WITH last_mo AS (SELECT msisdn, total_data_gb FROM dou_monthly WHERE month=(SELECT MAX(month) FROM dou_monthly)), three_mo_ago AS (SELECT msisdn, total_data_gb FROM dou_monthly WHERE month=(SELECT month FROM (SELECT DISTINCT month FROM dou_monthly ORDER BY month DESC LIMIT 1 OFFSET 2) t)) SELECT s.region, COUNT(DISTINCT t.msisdn) as churn_risk_count, ROUND(AVG(t.total_data_gb),1) as avg_usage_3mo_ago, ROUND(AVG(l.total_data_gb),1) as avg_usage_last_mo, GROUP_CONCAT(DISTINCT p.plan_name) as plans FROM three_mo_ago t JOIN last_mo l ON t.msisdn=l.msisdn AND t.total_data_gb > 30 AND l.total_data_gb < 10 JOIN subscribers s ON t.msisdn=s.msisdn JOIN op.subscriptions sub ON t.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id GROUP BY s.region ORDER BY churn_risk_count DESC
 note: Use WITH CTEs to isolate each month's data first, then JOIN on msisdn. dou_monthly is in SC DB; plans/subscriptions are in op DB — always use QUERY_BOTH with ATTACH. NEVER use subscriber_technology for usage — it has no usage columns.
 ==END==
+
+==DOC==
+title: Campaign performance — sent, delivered, conversion and opt-out rates
+tags: campaign performance results outcome conversion opt-out delivered sms how did campaign perform funnel
+question: How did our campaigns perform? Show conversion and opt-out rates per campaign.
+db: OP
+sql: SELECT c.campaign_id, c.campaign_name, c.campaign_type, c.status, COUNT(sl.sms_id) AS sms_sent, SUM(CASE WHEN sl.status='delivered' THEN 1 ELSE 0 END) AS delivered, SUM(CASE WHEN sl.response='opt_in' THEN 1 ELSE 0 END) AS opt_in, SUM(CASE WHEN sl.response='opt_out' THEN 1 ELSE 0 END) AS opt_out, SUM(CASE WHEN sl.response='query' THEN 1 ELSE 0 END) AS queries, ROUND(100.0*SUM(CASE WHEN sl.response='opt_in' THEN 1 ELSE 0 END)/NULLIF(SUM(CASE WHEN sl.status='delivered' THEN 1 ELSE 0 END),0),1) AS conversion_pct FROM campaigns c LEFT JOIN sms_log sl ON c.campaign_id=sl.campaign_id GROUP BY c.campaign_id ORDER BY conversion_pct DESC
+note: Campaign feedback lives in sms_log (operator DB): status is sent/delivered/failed, response is none/opt_in/opt_out/query. opt_in = converted. Conversion rate = opt_in / delivered. campaign_targets.converted mirrors opt_in.
+==END==
+
+==DOC==
+title: Campaign replies — what subscribers are actually saying (inbound SMS text)
+tags: campaign replies responses inbound sms what are people saying messages feedback text complaints questions
+question: What are subscribers replying to our campaign? Show their inbound messages.
+db: OP
+sql: SELECT c.campaign_name, sl.response AS intent, sl.inbound_text, COUNT(*) AS n FROM sms_log sl JOIN campaigns c ON sl.campaign_id=c.campaign_id WHERE sl.inbound_text IS NOT NULL GROUP BY c.campaign_id, sl.response, sl.inbound_text ORDER BY c.campaign_name, n DESC
+note: inbound_text holds the subscriber's actual reply; response is the classified intent (opt_in/opt_out/query). Only rows where a reply was received have inbound_text set. Filter by c.campaign_name for a single campaign.
+==END==
+
+==DOC==
+title: Campaign queries needing follow-up (subscribers who asked a question)
+tags: campaign follow-up queries questions asked interested undecided next action who to contact
+question: Which subscribers replied with a question and need a follow-up after the campaign?
+db: OP
+sql: SELECT c.campaign_name, sl.msisdn, sl.inbound_text, cv.value_segment, cv.arpu FROM sms_log sl JOIN campaigns c ON sl.campaign_id=c.campaign_id LEFT JOIN customer_value cv ON sl.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM customer_value) WHERE sl.response='query' ORDER BY cv.arpu DESC
+note: response='query' = interested-but-undecided subscribers — prime follow-up targets. Join customer_value (latest month) to prioritise by ARPU/segment. These are the people a follow-up campaign should target.
+==END==

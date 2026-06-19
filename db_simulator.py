@@ -550,6 +550,11 @@ def _ensure_new_tables():
             affected_service TEXT
         );
     """)
+    # sms_log.inbound_text — captures the subscriber's reply to a campaign SMS (Phase 2)
+    try:
+        op.execute("ALTER TABLE sms_log ADD COLUMN inbound_text TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     op.commit()
     op.close()
     print("  [INIT] New tables verified/created")
@@ -1494,21 +1499,84 @@ def simulate_congestion_incident(verbose=False):
     if verbose: print(f"  [INCIDENT] Congestion — {region}, {affected} users")
 
 
+# Outbound campaign copy by type, and realistic inbound replies by intent.
+_CAMPAIGN_MSG = {
+    "retention":    "We value you! Enjoy 20% off your next 3 months. Reply YES to claim.",
+    "winback":      "We miss you! Come back for 50% off for 2 months. Reply YES.",
+    "upsell":       "Upgrade your plan and get 10GB bonus data. Reply YES to upgrade.",
+    "5g_upsell":    "Your device supports 5G! Activate now + 10GB free. Reply YES.",
+    "3g_migration": "3G is retiring soon. Switch to 4G free, keep your number. Reply YES.",
+}
+_INBOUND_TEXT = {
+    "opt_in":  ["YES", "Yes please activate", "Sounds good, sign me up", "YES interested"],
+    "opt_out": ["STOP", "Not interested", "Unsubscribe", "Stop texting me"],
+    "query":   ["How much does it cost?", "Does this work with my plan?",
+                "What's the catch?", "Until when is this valid?"],
+}
+
+
 def simulate_campaign_progress(verbose=False):
-    campaigns = op_query("SELECT campaign_id FROM campaigns WHERE status='active' ORDER BY RANDOM() LIMIT 3")
-    for (campaign_id,) in campaigns:
-        op_write("""
-            UPDATE campaign_targets SET converted=1
-            WHERE campaign_id=? AND converted=0
-            AND msisdn IN (
-                SELECT msisdn FROM campaign_targets WHERE campaign_id=? AND converted=0
-                ORDER BY RANDOM() LIMIT 3
-            )
-        """, (campaign_id, campaign_id))
+    """Queue SMS for active campaigns (mark targets notified, drop a 'sent' sms_log
+    row), then let active campaigns complete once most targets have converted.
+    Delivery + replies are handled by simulate_sms_lifecycle (shared with standalone
+    SMS that humans approve in the Ops Portal)."""
+    campaigns = op_query("SELECT campaign_id, campaign_type FROM campaigns WHERE status='active' ORDER BY RANDOM() LIMIT 3")
+    now = datetime.now().isoformat()
+
+    for campaign_id, ctype in campaigns:
+        msg = _CAMPAIGN_MSG.get(ctype or "retention", _CAMPAIGN_MSG["retention"])
+
+        # ── Notify a fresh batch of targets: queue the SMS (status='sent') ──
+        to_notify = op_query(
+            "SELECT msisdn FROM campaign_targets WHERE campaign_id=? AND notified=0 ORDER BY RANDOM() LIMIT 25",
+            (campaign_id,))
+        for (msisdn,) in to_notify:
+            op_write(
+                "INSERT INTO sms_log (msisdn, campaign_id, sent_date, message_text, status, response) "
+                "VALUES (?,?,?,?, 'sent', 'none')",
+                (msisdn, campaign_id, now, msg))
+            op_write("UPDATE campaign_targets SET notified=1 WHERE campaign_id=? AND msisdn=?",
+                     (campaign_id, msisdn))
+        if to_notify and verbose:
+            print(f"  [CAMPAIGN {campaign_id}] queued {len(to_notify)} SMS ({ctype})")
+
+        # ── Complete the campaign once most targets have converted ─────────
         counts = op_query("SELECT COUNT(*), SUM(converted) FROM campaign_targets WHERE campaign_id=?", (campaign_id,))
         if counts and counts[0][0] > 0 and (counts[0][1] or 0) / counts[0][0] > 0.8:
             op_write("UPDATE campaigns SET status='completed' WHERE campaign_id=?", (campaign_id,))
             if verbose: print(f"  [CAMPAIGN] Campaign {campaign_id} completed")
+
+
+def simulate_sms_lifecycle(verbose=False):
+    """Advance EVERY queued SMS through its lifecycle — works for campaign SMS and
+    for standalone SMS a human approves in the Ops Portal (campaign_id NULL).
+    sent -> delivered/failed, then delivered -> an inbound reply (opt_in/opt_out/query).
+    On opt_in for a campaign SMS, mark the campaign target converted."""
+    # 1. sent -> delivered (~92%) / failed (~8%)
+    queued = op_query("SELECT sms_id FROM sms_log WHERE status='sent' ORDER BY RANDOM() LIMIT 60")
+    for (sms_id,) in queued:
+        op_write("UPDATE sms_log SET status=? WHERE sms_id=?",
+                 ("delivered" if random.random() > 0.08 else "failed", sms_id))
+
+    # 2. delivered + no reply yet -> roll an inbound response
+    pending = op_query(
+        "SELECT sms_id, campaign_id, msisdn FROM sms_log "
+        "WHERE status='delivered' AND response='none' ORDER BY RANDOM() LIMIT 40")
+    replied = 0
+    for sms_id, campaign_id, msisdn in pending:
+        roll = random.random()
+        if   roll < 0.25: intent = "opt_in"    # converts
+        elif roll < 0.40: intent = "query"     # asks a question
+        elif roll < 0.50: intent = "opt_out"   # unsubscribes
+        else:             continue             # stays silent this tick
+        reply = random.choice(_INBOUND_TEXT[intent])
+        op_write("UPDATE sms_log SET response=?, inbound_text=? WHERE sms_id=?", (intent, reply, sms_id))
+        if intent == "opt_in" and campaign_id is not None:
+            op_write("UPDATE campaign_targets SET converted=1 WHERE campaign_id=? AND msisdn=?",
+                     (campaign_id, msisdn))
+        replied += 1
+    if verbose and (queued or replied):
+        print(f"  [SMS] delivered {len(queued)} queued, {replied} new replies")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1593,6 +1661,7 @@ def main():
                 simulate_offer_acceptance(args.verbose)
                 simulate_qoe_update(args.verbose)
                 simulate_new_table_tick(args.verbose)
+                simulate_sms_lifecycle(args.verbose)   # deliver + collect replies for any queued SMS
 
             # Every 3 ticks
             if tick_count % 3 == 0:

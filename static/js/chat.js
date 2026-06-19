@@ -278,16 +278,51 @@ const Chat = (() => {
     if (result.response_type === "success")   wrap && wrap.classList.add("msg-success");
     if (result.response_type === "cancelled") wrap && wrap.classList.add("msg-error");
 
-    // Clarify — render drill-down path choices as clickable buttons
-    if (result.response_type === "clarify" && Array.isArray(result.options) && result.options.length && wrap) {
+    // Clarify — drill-down path choices and/or a numeric baseline input
+    if (result.response_type === "clarify" && wrap &&
+        ((Array.isArray(result.options) && result.options.length) || (result.input && result.input.template))) {
       const opts = document.createElement("div");
       opts.className = "clarify-options";
-      result.options.forEach(o => {
+      const lockAll = () => opts.querySelectorAll("button,input").forEach(x => x.disabled = true);
+
+      // numeric baseline input — type your own threshold instead of "above average"
+      if (result.input && result.input.template) {
+        const row = document.createElement("div");
+        row.className = "clarify-input-row";
+        const field = document.createElement("input");
+        field.type = "number";
+        field.className = "clarify-input";
+        field.placeholder = result.input.placeholder || "enter a number";
+        const submit = () => {
+          const v = field.value.trim();
+          if (v === "") { field.focus(); return; }
+          lockAll();
+          apply.classList.add("picked");
+          if (typeof App !== "undefined") App.sendSilent(result.input.template.replace("{value}", v));
+        };
+        const apply = document.createElement("button");
+        apply.className = "clarify-btn clarify-apply";
+        apply.textContent = "Apply";
+        apply.onclick = submit;
+        field.addEventListener("keydown", e => { if (e.key === "Enter") submit(); });
+        row.appendChild(field);
+        if (result.input.unit) {
+          const u = document.createElement("span");
+          u.className = "clarify-unit";
+          u.textContent = result.input.unit;
+          row.appendChild(u);
+        }
+        row.appendChild(apply);
+        opts.appendChild(row);
+      }
+
+      // preset / "let the agent decide" buttons
+      (result.options || []).forEach(o => {
         const b = document.createElement("button");
         b.className = "clarify-btn";
         b.innerHTML = `<span class="clarify-arrow">▸</span> ${_esc(o.label)}`;
         b.onclick = () => {
-          opts.querySelectorAll(".clarify-btn").forEach(x => x.disabled = true);
+          lockAll();
           b.classList.add("picked");
           // sendSilent: run the refined query without echoing it as a user
           // bubble — the picked chip is the visible record of the choice
@@ -295,6 +330,7 @@ const Chat = (() => {
         };
         opts.appendChild(b);
       });
+
       wrap.appendChild(opts);
     }
 

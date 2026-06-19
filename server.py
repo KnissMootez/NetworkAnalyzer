@@ -1,7 +1,7 @@
 """
 NetworkAnalyzer Copilot — FastAPI server
 Serves the frontend SPA and provides:
-  - WebSocket /ws/chat?model=7b|14b|gemma|qwen3  (streaming LLM)
+  - WebSocket /ws/chat?model=bedrock|bedrock-80b|langgraph  (streaming LLM, AWS Bedrock)
   - REST /api/*  (metrics, network, subscribers, commercial, campaigns)
 """
 
@@ -449,6 +449,7 @@ async def ws_chat(websocket: WebSocket, model: str = "qwen3"):
                         "strategy_diagram": result.get("strategy_diagram"),
                         "mindmap":          result.get("mindmap"),
                         "options":          result.get("options", []),
+                        "input":            result.get("input"),
                         "steps":            result.get("steps", []),
                         "think_log":        result.get("think_log", []),
                         "truncated":        result.get("truncated", False),
@@ -816,13 +817,6 @@ async def api_set_model(config: dict):
         os.environ["BEDROCK_MODEL"] = "qwen.qwen3-next-80b-a3b"
     else:
         os.environ["BEDROCK_MODEL"] = "qwen.qwen3-32b-v1:0"
-
-    thinking = config.get("thinking_enabled", None)
-    if thinking is not None and hasattr(_agent_bedrock, "THINKING_ENABLED"):
-        _agent_bedrock.THINKING_ENABLED = bool(thinking)
-    budget = config.get("think_budget", None)
-    if budget is not None and hasattr(_agent_bedrock, "THINK_BUDGET"):
-        _agent_bedrock.THINK_BUDGET = int(budget)
 
     _agent_bedrock.reset_memory()
     return {"ok": True, "model": model}

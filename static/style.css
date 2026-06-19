@@ -532,6 +532,23 @@ details summary:hover { color: var(--text); }
 .clarify-btn.picked { border-color: var(--p400); color: #fff; opacity: 1; background: rgba(99,102,241,.3); }
 .clarify-arrow { color: var(--p400); }
 
+/* baseline numeric input — type your own threshold */
+.clarify-input-row { display: flex; align-items: center; gap: 8px; }
+.clarify-input {
+  flex: 1;
+  padding: 9px 13px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: .8rem;
+  color: #fff;
+  background: rgba(99,102,241,.08);
+  border: 1px solid rgba(99,102,241,.32);
+  border-radius: 8px;
+  outline: none;
+}
+.clarify-input:focus { border-color: var(--p400); background: rgba(99,102,241,.16); }
+.clarify-unit { font-family: 'Share Tech Mono', monospace; font-size: .72rem; color: var(--p200); }
+.clarify-apply { flex: 0 0 auto; justify-content: center; }
+
 /* ── Charts ── */
 .chart-box {
   flex: 1;

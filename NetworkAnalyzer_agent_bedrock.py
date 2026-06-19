@@ -4,7 +4,6 @@ import json
 import time
 import random
 import sqlite3
-import requests
 from datetime import datetime, timedelta
 from rag_retriever import retrieve, retrieve_sql
 from schema_graph_retriever import retrieve_graph_context, classify_intent
@@ -32,30 +31,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SC_DB    = os.path.join(BASE_DIR, "NetworkAnalyzer_new.db")
 OP_DB    = os.path.join(BASE_DIR, "operator_new.db")
 # ═══════════════════════════════════════════════════════════════════════
-# MODEL CONFIG — Qwen3 8B (thinking mode capable, better reasoning/conclusions)
+# MODEL CONFIG — AWS Bedrock ONLY. There is no local LLM: an RTX 3050 4GB
+# cannot host a useful model, so all inference runs on Bedrock. The model id
+# comes from the BEDROCK_MODEL env var (set by server.py).
 # ═══════════════════════════════════════════════════════════════════════
-MODEL           = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
-OLLAMA_BASE     = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
-NUM_YuanU_LAYERS  = 25
-NUM_THREADS     = 8
-CTX_SIZE        = 8192
-
-
 def _print_model_config():
-    print(f"=== NetworkAnalyzer Agent (Bedrock) ===")
-    print(f"  Model:       {MODEL}")
-    print(f"  YuanU layers:  {NUM_YuanU_LAYERS}  (VRAM)")
-    print(f"  CPU threads: {NUM_THREADS}  (RAM)")
-    print(f"  Context:     {CTX_SIZE} tokens")
-    print(f"=================================")
+    model_id = os.environ.get("BEDROCK_MODEL", "qwen.qwen3-32b-v1:0")
+    print(f"=== NetworkAnalyzer Agent (AWS Bedrock) ===")
+    print(f"  Model:    {model_id}")
+    print(f"  Provider: AWS Bedrock — no local LLM")
+    print(f"===========================================")
 
 _print_model_config()
-
-
-def set_gpu_layers(n: int):
-    global NUM_YuanU_LAYERS
-    NUM_YuanU_LAYERS = n
-    print(f"YuanU layers updated to {n} — takes effect on next query")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1354,67 +1341,6 @@ def _llm(system: str, prompt: str, max_tokens: int = 1200, timeout: int = 300, a
     return _bedrock(system, prompt, max_tokens, history=history)
 
 
-def _ollama(system: str, prompt: str, max_tokens: int = 1200, timeout: int = 300, allow_thinking: bool = True) -> str:
-    """Call Ollama via /api/chat with native thinking support for qwen3."""
-    use_stream = _streaming_queue is not None
-    think = bool(THINKING_ENABLED) and allow_thinking
-    try:
-        r = requests.post(
-            f"{OLLAMA_BASE}/api/chat",
-            json={
-                "model": MODEL,
-                "think": think,
-                "thinking": {"budget_tokens": THINK_BUDGET} if think else None,
-                "stream": use_stream,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": prompt},
-                ],
-                "options": {
-                    "num_predict": max_tokens,
-                    "num_gpu":     NUM_YuanU_LAYERS,
-                    "num_thread":  NUM_THREADS,
-                    "num_ctx":     CTX_SIZE,
-                    "low_vram":    True,
-                    "f16_kv":      False,
-                }
-            },
-            stream=use_stream,
-            timeout=timeout
-        )
-        if use_stream:
-            answer_parts = []
-            for raw_line in r.iter_lines():
-                if _stop_event and _stop_event.is_set():
-                    r.close()
-                    break
-                if not raw_line:
-                    continue
-                chunk = json.loads(raw_line)
-                msg = chunk.get("message", {})
-                think_tok = msg.get("thinking", "")
-                if think_tok and _streaming_queue:
-                    _streaming_queue.put({"type": "think_token", "token": think_tok})
-                answer_tok = msg.get("content", "")
-                if answer_tok:
-                    answer_parts.append(answer_tok)
-                    if _streaming_queue:
-                        _streaming_queue.put({"type": "token", "token": answer_tok})
-                if chunk.get("done"):
-                    break
-            return _sanitize_response("".join(answer_parts).strip())
-
-        # Non-streaming path
-        data = r.json()
-        think_part  = data.get("message", {}).get("thinking", "")
-        answer_part = data.get("message", {}).get("content",  "").strip()
-        if think_part:
-            _think_log.append(think_part.strip())
-        return _sanitize_response(answer_part)
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
 def _check_sql(sql: str, db_path: str) -> str | None:
     """Compile-check SQL before executing. Returns None if valid, or an error
     string with the actual column names for every table referenced."""
@@ -2031,6 +1957,7 @@ Rules:
 - Use correct campaign types: 5G_upsell, 3G_migration, FWA, VoLTE_sunset, HVC_upsell.
 - In JSON output, never use commas in numbers. Write 13532 not 13,532.
 - Before writing the "text" field, verify all arithmetic: if your query returns grouped counts, the "remaining" group is total minus the sum of all other groups. Never reuse the total as a subgroup count.
+- RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
 
 OUTPUT FORMAT — When writing CONCLUDE, output valid JSON on a single line. Field order MUST be: text, recommendations, strategy_diagram, mindmap, chart — in that exact order:
 {"text": "your analysis here", "recommendations": ["action 1", "action 2", "action 3"], "strategy_diagram": {"title": "Migration Strategy", "segments": [{"label": "3G Non-VoLTE", "count": 8658, "color": "red", "strategy": "4G Terminal Upgrade"}, {"label": "3G VoLTE-capable", "count": 3765, "color": "amber", "strategy": "VoLTE Migration"}], "strategies": [{"label": "4G Terminal Upgrade", "tier": "4G", "color": "amber", "actions": ["Subsidized device swap", "Bundle package offer"]}, {"label": "VoLTE Migration", "tier": "4G", "color": "purple", "actions": ["SMS activation campaign", "3-month data bonus"]}]}, "mindmap": {"center": "3G Sunset Strategy", "nodes": [{"id": "n1", "label": "3G-Only Devices", "value": "8641 subs", "color": "red", "type": "data", "children": [{"id": "n1a", "label": "No 4G capability", "type": "data", "color": "red"}, {"id": "n1b", "label": "Subsidized device swap", "type": "suggestion", "color": "red"}, {"id": "n1c", "label": "Targeted SMS alerts", "type": "suggestion", "color": "red"}]}, {"id": "n2", "label": "VoLTE-Capable", "value": "3711 subs", "color": "amber", "type": "data", "children": [{"id": "n2a", "label": "Has 4G device", "type": "data", "color": "amber"}, {"id": "n2b", "label": "Activate VoLTE via app", "type": "suggestion", "color": "amber"}]}]}, "chart": {"type": "bar", "title": "Chart Title", "x": ["A","B","C"], "y": [1,2,3], "x_label": "Category", "y_label": "Value"}}
@@ -3687,6 +3614,7 @@ RULES:
 - All monetary values (ARPU, prices, revenue) are in Yuan — never $ or USD or TND.
 - Never use commas in numbers: 13532 not 13,532.
 - Verify arithmetic before concluding: if a query returns grouped counts, the "remaining" group is total minus the sum of the other groups. Never reuse the total as a subgroup count.
+- RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
 
 BEFORE calling conclude — if you have run only 1 query so far and the question has a commercial angle, you MUST run 1 enrichment query first. Match it to the context:
 - Top ARPU / platinum subscribers → check what plan they're on (already on the highest tier?) or whether they have 5G-capable devices not yet on 5G
@@ -4154,10 +4082,79 @@ def _llm_clarify_gate(question: str):
             "text": str(obj.get("question") or "Which would you like?").strip(),
             "options": opts}
 
+# ── Baseline / threshold clarify ──────────────────────────────────────────────
+# When an answer hinges on a numeric cutoff ("high" ARPU, "heavy" data users,
+# "high" churn risk), don't silently use the average (misleading on skewed data) —
+# ask the human for the number, with a free-input field + a "let the agent pick" option.
+_BASELINE_MARKERS = (
+    "above average", "below average", "high arpu", "low arpu", "high value", "high-value",
+    "low value", "heavy user", "heavy data", "high usage", "low usage", "high churn",
+    "high risk", "high spend", "big spender", "top spender", "expensive", "high revenue",
+    "premium customer", "significant", "high throughput", "low throughput", "high drop",
+)
+
+_BASELINE_SYS = (
+    "You decide if answering a telecom-analytics question needs a NUMERIC THRESHOLD that the "
+    "operator should set, rather than the agent guessing. Relative baselines like the average are "
+    "often misleading on skewed data (a few whales pull the mean up), so when a question says "
+    "'high'/'low'/'heavy'/'above average' about a metric (ARPU, data usage, churn risk, spend, "
+    "throughput), prefer to ASK for the cutoff.\n"
+    'If no numeric threshold is needed, output exactly: {"clarify": false}\n'
+    "Otherwise output:\n"
+    '{"clarify": true, "question": "<short question naming the metric>", "metric": "ARPU", '
+    '"unit": "Yuan", "suggested": <a sensible default number>, '
+    '"template": "<a complete standalone question with {value} where the number goes>", '
+    '"options": [{"label": "Let the agent pick a sensible cutoff", "query": "<complete question telling the agent to choose the cutoff itself, e.g. a high percentile>"}]}\n'
+    "The template MUST contain {value} exactly once and read as a full question. "
+    "Units: ARPU/revenue/spend=Yuan, data=GB, churn risk=score 0-1, throughput=Mbps. "
+    "Output ONLY the JSON."
+)
+
+def _maybe_clarify_baseline(question: str):
+    """If the question leans on a relative threshold, return a clarify dict with a
+    free numeric input (template carrying {value}) + a 'let the agent decide' option."""
+    ql = question.lower()
+    if not any(m in ql for m in _BASELINE_MARKERS):
+        return None
+    raw = _llm_quiet(_BASELINE_SYS, f"Question: {question}\nJSON:", max_tokens=300, allow_thinking=False)
+    if not raw or raw.startswith("ERROR"):
+        return None
+    obj_txt = _first_json_obj(raw)
+    if not obj_txt:
+        return None
+    try:
+        obj = json.loads(re.sub(r'\s+', ' ', obj_txt))
+    except Exception:
+        return None
+    if not obj.get("clarify"):
+        return None
+    tmpl = str(obj.get("template") or "").strip()
+    if "{value}" not in tmpl:
+        return None
+    metric    = str(obj.get("metric") or "value").strip()
+    unit      = str(obj.get("unit") or "").strip()
+    suggested = obj.get("suggested")
+    opts = [{"label": str(o.get("label", "")).strip(), "query": str(o.get("query", "")).strip()}
+            for o in (obj.get("options") or []) if o.get("query")][:3]
+    # always guarantee a "let the agent choose" fallback
+    if not any(k in o["label"].lower() for o in opts for k in ("decide", "agent", "pick", "choose")):
+        opts.append({"label": "Let the agent choose a sensible cutoff",
+                     "query": tmpl.replace("{value}", "a cutoff you choose (use a high percentile, not the mean)")})
+    return {
+        "type": "clarify",
+        "text": str(obj.get("question") or f"What {metric} cutoff should I use?").strip(),
+        "input": {
+            "metric": metric, "unit": unit, "template": tmpl,
+            "placeholder": (f"e.g. {suggested}" if suggested is not None else "enter a number"),
+        },
+        "options": opts,
+    }
+
 def _maybe_clarify(question: str):
-    """Unified curiosity: deterministic subscriber-drill catalog first (instant),
+    """Unified curiosity: baseline/threshold ask first (so 'high ARPU' style questions
+    get a number input), then the deterministic subscriber-drill catalog (instant),
     then the general LLM clarify gate for other vague questions."""
-    return _maybe_clarify_dimensions(question) or _llm_clarify_gate(question)
+    return _maybe_clarify_baseline(question) or _maybe_clarify_dimensions(question) or _llm_clarify_gate(question)
 
 # ═══════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
@@ -4217,7 +4214,14 @@ def run_agent(user_input: str) -> dict:
     else:
         _clar = _maybe_clarify(resolved_input)
         if _clar:
-            _recent_clarify = {o["query"] for o in _clar["options"]}
+            _recent_clarify = {o["query"] for o in _clar.get("options", [])}
+            # baseline clarify: register the static prefix of the {value} template so a
+            # human-typed number (filled client-side) bypasses the chooser and runs directly
+            _tmpl = (_clar.get("input") or {}).get("template", "")
+            if "{value}" in _tmpl:
+                _prefix = _tmpl.split("{value}")[0].strip()
+                if len(_prefix) >= 12:
+                    _recent_clarify.add(_prefix)
             print(f"[Clarify] offering choices — '{resolved_input[:50]}'")
             return _clar
 

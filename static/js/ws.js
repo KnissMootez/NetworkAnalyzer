@@ -4,7 +4,7 @@
 
 const WS = (() => {
   let socket   = null;
-  let model    = "7b";
+  let model    = "bedrock";
   let handlers = {};
   let pingInterval = null;
 

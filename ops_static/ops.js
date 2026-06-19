@@ -286,6 +286,80 @@ async function loadAudit() {
   </tr>`).join('');
 }
 
+// ── Compose (human origination) ─────────────────────────────────────────────
+let _composeMode = 'sms';
+
+function openCompose() {
+  document.getElementById('compose-msg').textContent = '';
+  document.getElementById('compose-overlay').classList.add('open');
+  previewAudience();
+}
+function closeCompose() {
+  document.getElementById('compose-overlay').classList.remove('open');
+}
+function setComposeMode(mode) {
+  _composeMode = mode;
+  document.querySelectorAll('.cmode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.getElementById('c-sms-fields').style.display  = mode === 'sms' ? 'block' : 'none';
+  document.getElementById('c-camp-fields').style.display = mode === 'campaign' ? 'block' : 'none';
+  document.getElementById('compose-send').textContent = mode === 'sms' ? 'Send SMS' : 'Launch Campaign';
+}
+
+let _previewT = null;
+function previewAudience() {
+  clearTimeout(_previewT);
+  _previewT = setTimeout(async () => {
+    const params = new URLSearchParams();
+    const region = document.getElementById('c-region').value.trim();
+    const tech   = document.getElementById('c-tech').value;
+    const seg    = document.getElementById('c-segment').value;
+    if (region) params.append('region', region);
+    if (tech)   params.append('technology', tech);
+    if (seg)    params.append('segment', seg);
+    try {
+      const r = await fetch(`${API}/api/audience/preview?${params}`).then(x => x.json());
+      const limit = parseInt(document.getElementById('c-limit').value) || 0;
+      const reach = limit && limit < r.count ? `${limit} of ${r.count.toLocaleString()}` : r.count.toLocaleString();
+      document.getElementById('c-preview').textContent = `${reach} subscribers match`;
+    } catch { document.getElementById('c-preview').textContent = '—'; }
+  }, 350);
+}
+
+async function submitCompose() {
+  const btn   = document.getElementById('compose-send');
+  const msgEl = document.getElementById('compose-msg');
+  const body  = {
+    region:     document.getElementById('c-region').value.trim() || null,
+    technology: document.getElementById('c-tech').value || null,
+    segment:    document.getElementById('c-segment').value || null,
+    limit:      parseInt(document.getElementById('c-limit').value) || 500,
+  };
+  let url;
+  if (_composeMode === 'sms') {
+    body.message = document.getElementById('c-message').value.trim();
+    if (!body.message) { msgEl.textContent = 'Enter a message first.'; return; }
+    url = '/api/originate/sms';
+  } else {
+    body.campaign_name = document.getElementById('c-camp-name').value.trim();
+    body.campaign_type = document.getElementById('c-camp-type').value;
+    if (!body.campaign_name) { msgEl.textContent = 'Enter a campaign name first.'; return; }
+    url = '/api/originate/campaign';
+  }
+  btn.disabled = true; msgEl.textContent = 'Sending…';
+  try {
+    const res  = await fetch(API + url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) { msgEl.textContent = data.detail || 'Failed.'; btn.disabled = false; return; }
+    const n = _composeMode === 'sms' ? data.sent : data.targeted;
+    msgEl.textContent = `✓ ${_composeMode === 'sms' ? 'SMS queued to' : 'Campaign launched for'} ${n} subscribers.`;
+    setTimeout(() => { closeCompose(); loadTab(document.querySelector('.nav-item.active').dataset.tab); refreshBadges(); }, 1100);
+  } catch {
+    msgEl.textContent = 'Network error.'; btn.disabled = false;
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 refreshBadges();
 loadCampaigns();

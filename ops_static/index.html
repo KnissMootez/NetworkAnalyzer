@@ -15,6 +15,7 @@
       <div class="logo-sub">Ops Portal</div>
     </div>
   </div>
+  <button class="compose-btn" onclick="openCompose()">＋ New Action</button>
   <nav>
     <a class="nav-item active" data-tab="campaigns"     href="#">
       <span class="nav-icon">📋</span> Campaigns
@@ -164,6 +165,60 @@
       <button class="btn-approve" onclick="resolveAction('approved')">✓ Approve</button>
       <button class="btn-deny"    onclick="resolveAction('denied')">✗ Deny</button>
       <button class="btn-cancel"  onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- COMPOSE MODAL (human origination) -->
+<div class="modal-overlay" id="compose-overlay">
+  <div class="modal">
+    <h3>New action</h3>
+    <p>Send an SMS or launch a campaign directly to an audience.</p>
+
+    <div class="compose-modes">
+      <button class="cmode active" data-mode="sms"      onclick="setComposeMode('sms')">💬 Send SMS</button>
+      <button class="cmode"        data-mode="campaign" onclick="setComposeMode('campaign')">🎯 Launch Campaign</button>
+    </div>
+
+    <label class="compose-label">Audience</label>
+    <div class="compose-filters">
+      <input  id="c-region"  placeholder="Region (blank = all)" oninput="previewAudience()" />
+      <select id="c-tech"  onchange="previewAudience()">
+        <option value="">All tech</option>
+        <option value="2G">2G</option><option value="3G">3G</option>
+        <option value="4G">4G</option><option value="5G">5G</option>
+      </select>
+      <select id="c-segment" onchange="previewAudience()">
+        <option value="">All segments</option>
+        <option value="bronze">Bronze</option><option value="silver">Silver</option>
+        <option value="gold">Gold</option><option value="platinum">Platinum</option>
+      </select>
+      <input  id="c-limit" type="number" value="500" min="1" title="Max recipients" oninput="previewAudience()" />
+    </div>
+    <div id="c-preview" class="compose-preview">—</div>
+
+    <div id="c-sms-fields">
+      <label class="compose-label">Message</label>
+      <textarea id="c-message" rows="3" placeholder="SMS message to send…"></textarea>
+    </div>
+
+    <div id="c-camp-fields" style="display:none">
+      <label class="compose-label">Campaign</label>
+      <input id="c-camp-name" placeholder="Campaign name" />
+      <select id="c-camp-type">
+        <option value="retention">Retention</option>
+        <option value="5g_upsell">5G Upsell</option>
+        <option value="3g_migration">3G Migration</option>
+        <option value="FWA">FWA</option>
+        <option value="VoLTE_sunset">VoLTE Sunset</option>
+        <option value="HVC_upsell">HVC Upsell</option>
+      </select>
+    </div>
+
+    <div id="compose-msg" class="compose-result"></div>
+    <div class="modal-buttons">
+      <button class="btn-approve" id="compose-send" onclick="submitCompose()">Send</button>
+      <button class="btn-cancel"  onclick="closeCompose()">Cancel</button>
     </div>
   </div>
 </div>

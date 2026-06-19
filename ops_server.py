@@ -290,3 +290,111 @@ def get_kpis(region: str = None, limit: int = 50):
 @app.get("/api/network/flags")
 def get_network_flags():
     return get_actions(type="network_flag")
+
+
+# ── Origination — humans send SMS / launch campaigns directly ─────────────────
+# The ops portal is the human action layer: besides approving agent proposals it
+# can originate sends. These resolve an audience by filter, then write the same
+# rows an approval would — so the simulator's SMS lifecycle picks them up.
+
+def _resolve_audience(region, technology, segment, limit=None, count_only=False):
+    """Resolve subscribers matching a filter. Returns a count or a list of msisdns."""
+    sc = sqlite3.connect(SC_DB)
+    sc.row_factory = sqlite3.Row
+    sc.execute(f"ATTACH DATABASE '{OP_DB}' AS op")
+    where, args = "WHERE s.is_active=1", []
+    if region:     where += " AND s.region=?";              args.append(region)
+    if technology: where += " AND st.current_technology=?"; args.append(technology)
+    if segment:    where += " AND cv.value_segment=?";      args.append(segment)
+    base = f"""FROM subscribers s
+        LEFT JOIN subscriber_technology st ON s.msisdn=st.msisdn
+        LEFT JOIN op.customer_value cv ON s.msisdn=cv.msisdn
+            AND cv.month=(SELECT MAX(month) FROM op.customer_value)
+        {where}"""
+    if count_only:
+        n = sc.execute(f"SELECT COUNT(DISTINCT s.msisdn) AS n {base}", args).fetchone()["n"]
+        sc.close()
+        return n
+    q = f"SELECT DISTINCT s.msisdn {base}"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    rows = [r["msisdn"] for r in sc.execute(q, args).fetchall()]
+    sc.close()
+    return rows
+
+
+@app.get("/api/audience/preview")
+def audience_preview(region: str = None, technology: str = None, segment: str = None):
+    return {"count": _resolve_audience(region, technology, segment, count_only=True)}
+
+
+class OriginateSms(BaseModel):
+    message:    str
+    region:     str = None
+    technology: str = None
+    segment:    str = None
+    limit:      int = 500
+
+
+@app.post("/api/originate/sms")
+def originate_sms(body: OriginateSms):
+    if not body.message.strip():
+        raise HTTPException(400, "Message is required.")
+    msisdns = _resolve_audience(body.region, body.technology, body.segment, limit=body.limit)
+    if not msisdns:
+        raise HTTPException(400, "No subscribers match this audience.")
+    conn = _get_conn()
+    now  = datetime.utcnow().isoformat()
+    for m in msisdns:
+        conn.execute(
+            "INSERT INTO sms_log (msisdn, sent_date, message_text, status, response) VALUES (?,?,?, 'sent','none')",
+            (m, now, body.message),
+        )
+    aud = " · ".join(x for x in [body.region, body.technology, body.segment] if x) or "all subscribers"
+    conn.execute(
+        """INSERT INTO agent_actions (type, title, summary, payload, status, created_at, resolved_at, note)
+           VALUES ('sms', ?, ?, ?, 'approved', ?, ?, 'originated by operator')""",
+        (body.message[:60], f"Operator SMS → {len(msisdns)} subscribers ({aud})",
+         json.dumps({"msisdns": msisdns, "message": body.message, "origin": "operator"}), now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"sent": len(msisdns)}
+
+
+class OriginateCampaign(BaseModel):
+    campaign_name: str
+    campaign_type: str = "retention"
+    region:        str = None
+    technology:    str = None
+    segment:       str = None
+    limit:         int = 1000
+
+
+@app.post("/api/originate/campaign")
+def originate_campaign(body: OriginateCampaign):
+    if not body.campaign_name.strip():
+        raise HTTPException(400, "Campaign name is required.")
+    msisdns = _resolve_audience(body.region, body.technology, body.segment, limit=body.limit)
+    if not msisdns:
+        raise HTTPException(400, "No subscribers match this audience.")
+    conn = _get_conn()
+    now  = datetime.utcnow().isoformat()
+    cur  = conn.execute(
+        "INSERT INTO campaigns (campaign_name, campaign_type, target_count, launched_date, status, created_by) "
+        "VALUES (?,?,?,?, 'active','operator')",
+        (body.campaign_name, body.campaign_type, len(msisdns), now[:10]),
+    )
+    cid = cur.lastrowid
+    for m in msisdns:
+        conn.execute("INSERT OR IGNORE INTO campaign_targets (campaign_id, msisdn, notified) VALUES (?,?,0)", (cid, m))
+    aud = " · ".join(x for x in [body.region, body.technology, body.segment] if x) or "all subscribers"
+    conn.execute(
+        """INSERT INTO agent_actions (type, title, summary, payload, status, created_at, resolved_at, note)
+           VALUES ('campaign', ?, ?, ?, 'approved', ?, ?, 'originated by operator')""",
+        (body.campaign_name, f"Operator campaign → {len(msisdns)} targets ({aud})",
+         json.dumps({"msisdns": msisdns, "campaign_type": body.campaign_type, "origin": "operator"}), now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"campaign_id": cid, "targeted": len(msisdns)}

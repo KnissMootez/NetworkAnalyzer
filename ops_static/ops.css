@@ -336,6 +336,84 @@ tr:hover td { background: var(--surface2); }
   font-size: 14px;
 }
 
+/* ── Compose (origination) ────────────────────────────────────────────── */
+.compose-btn {
+  margin: 0 16px 4px;
+  padding: 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.compose-btn:hover { opacity: 0.88; }
+
+.compose-modes { display: flex; gap: 8px; margin-bottom: 16px; }
+.cmode {
+  flex: 1;
+  padding: 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cmode.active { background: var(--surface); border-color: var(--accent); color: var(--accent); }
+
+.compose-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 4px 0 6px;
+}
+.compose-filters {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 0.7fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.compose-filters input, .compose-filters select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+}
+.compose-filters input:focus, .compose-filters select:focus { border-color: var(--accent); }
+
+.compose-preview {
+  font-size: 12px;
+  color: var(--accent);
+  background: #0f2030;
+  border: 1px solid #1a3a50;
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin-bottom: 16px;
+}
+#c-camp-fields input, #c-camp-fields select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 8px;
+}
+.compose-result { font-size: 13px; color: var(--muted); margin-bottom: 12px; min-height: 18px; }
+
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

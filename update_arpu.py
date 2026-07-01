@@ -52,8 +52,14 @@ def clamp(v, lo, hi):
 
 def gen_arpu(city):
     base, std = CITY_TIERS.get(city, DEFAULT_TIER)
-    val = random.gauss(base, std)
-    return round(clamp(val, 2.0, 250.0), 2)
+    val = max(2.0, random.gauss(base, std))
+    # Soft ceiling: instead of hard-clamping at 250 (which piles dozens of subscribers at
+    # exactly the cap), compress values above 220 so they approach 250 asymptotically —
+    # the top end stays spread out and distinguishable, and never quite reaches 250.
+    if val > 220.0:
+        room = 250.0 - 220.0
+        val = 220.0 + room * (1.0 - math.exp(-(val - 220.0) / room))
+    return round(val, 2)
 
 def segment(arpu):
     if arpu >= 120: return "platinum"

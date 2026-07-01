@@ -86,7 +86,9 @@ const Charts = (() => {
       textfont: { size: 9 },
     }], _layout({
       title: { text: spec.title || "", font: { size: 11 } },
-      xaxis: _axis({ title: spec.x_label || "" }),
+      // category axis = discrete labelled bars (never plot ID-like labels on a numeric scale)
+      xaxis: _axis({ title: spec.x_label || "", type: "category", automargin: true,
+                     tickangle: xVals.length > 6 ? -35 : 0 }),
       yaxis: _axis({ title: spec.y_label || "" }),
     }), CONFIG);
   }

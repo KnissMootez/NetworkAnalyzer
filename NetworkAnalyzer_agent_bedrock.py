@@ -1851,6 +1851,44 @@ def _chart_from_context(context: str, question: str) -> dict | None:
     return {"type": "bar", "title": title, "x": x, "y": y, "x_label": label_col.replace('_', ' ').title(), "y_label": y_label}
 
 
+def _fix_id_axis_chart(chart: dict | None) -> dict | None:
+    """If a bar chart placed raw subscriber IDs (msisdns) on the x-axis, swap them for
+    subscriber names, sort highest->lowest, and cap the bars. A per-entity ranking should
+    read like a labelled histogram (names on x), not IDs plotted on a numeric axis."""
+    if not isinstance(chart, dict) or chart.get("type") != "bar":
+        return chart
+    x = chart.get("x") or []
+    y = chart.get("y") or chart.get("values") or []
+    if not x or not y or len(x) != len(y):
+        return chart
+
+    def _norm(v):
+        s = str(v).strip()
+        return s[:-2] if s.endswith(".0") else s
+    xs = [_norm(v) for v in x]
+    ids = [v for v in xs if v.isdigit() and len(v) >= 8]
+    if len(ids) < max(2, int(len(xs) * 0.6)):
+        return chart  # not an ID axis — leave it alone
+
+    names: dict = {}
+    try:
+        in_list = ",".join("'" + v + "'" for v in ids)
+        for row in query_op(f"SELECT msisdn, full_name FROM customers WHERE msisdn IN ({in_list})"):
+            try:
+                names[str(row["msisdn"])] = row["full_name"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    labels = [names.get(v) or ("…" + v[-4:]) for v in xs]
+    paired = sorted(zip(labels, y), key=lambda t: (t[1] is None, -(t[1] or 0)))[:15]
+    chart["x"] = [p[0] for p in paired]
+    chart["y"] = [p[1] for p in paired]
+    chart["x_label"] = "Subscriber"
+    return chart
+
+
 def _to_chart_spec(text: str, question: str) -> dict | None:
     """
     Fallback chart formatter — runs only when CONCLUDE JSON has no chart key.
@@ -2010,35 +2048,67 @@ When asked what regions/cities/nations you cover: query subscriber count per reg
 """
 
 def _compute_composite_score(question: str, step_results: list[list[dict]]) -> list[dict] | None:
-    """Merge multiple query result sets on msisdn and compute composite score via LLM."""
+    """Merge multiple query result sets on msisdn and rank them.
+
+    The LLM ONLY proposes the ranking (which msisdns, in what order, with an optional
+    score/retention_offer). Every raw data value (arpu, usage, churn, etc.) is taken
+    from the REAL merged rows keyed by msisdn — the model never emits data values, so
+    it can't fabricate them (it used to invent the whole table)."""
     if not step_results or all(not r for r in step_results):
         return None
-    data_block = ""
-    for i, rows in enumerate(step_results):
-        if rows and "error" not in rows[0]:
-            cap = 30
-            sample = rows[:cap]
-            data_block += f"\nDataset {i+1} ({len(rows)} rows, showing {len(sample)}):\n"
-            data_block += "[" + ", ".join(str(dict(r)) for r in sample) + "]"
-    if not data_block:
+
+    # ── Deterministic merge on msisdn — real values only ──
+    merged: dict = {}
+    for rows in step_results:
+        if not rows or (isinstance(rows[0], dict) and "error" in rows[0]):
+            continue
+        for r in rows:
+            d = dict(r)
+            m = d.get("msisdn")
+            if m is None:
+                continue
+            merged.setdefault(str(m), {}).update({k: v for k, v in d.items() if v is not None})
+    if not merged:
         return None
+
+    # Compact real data for the ranking prompt (msisdn + its real fields)
+    sample = list(merged.items())[:60]
+    data_block = "\n".join(f"{m}: {vals}" for m, vals in sample)
     score_prompt = (
         f"Original question: {question}\n\n"
-        f"Raw data collected from multiple queries:\n{data_block}\n\n"
-        f"Merge these datasets on msisdn. Compute the composite score exactly as specified in the question. "
-        f"Return ONLY a valid JSON array of the top 20 subscribers sorted by score descending. "
-        f"Each object must have: msisdn, region, plan_name, arpu, risk_score, and retention_offer. "
-        f"Output ONLY the JSON array. No explanation, no markdown."
+        f"Merged subscriber data (msisdn: real values):\n{data_block}\n\n"
+        f"Rank these subscribers exactly as the question asks. Return ONLY a JSON array of the "
+        f"top 20 as {{\"msisdn\": \"...\", \"composite_score\": <number>, \"retention_offer\": \"...\"}}. "
+        f"Use ONLY msisdns from the data above. Do NOT include any other data fields. JSON only."
     )
-    print("[Scoring] Computing composite score via LLM...")
-    resp = _llm("You are a data analyst. Output only valid JSON. No explanation.", score_prompt, max_tokens=2000, allow_thinking=False)
+    print("[Scoring] Ranking via LLM (values stay from real rows)...")
+    resp = _llm("You rank subscribers. Output only a valid JSON array of msisdn rankings.",
+                score_prompt, max_tokens=1500, allow_thinking=False)
+
+    ranked = []
     match = re.search(r'\[.*\]', resp, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
+            ranked = json.loads(match.group(0))
         except Exception:
-            pass
-    return None
+            ranked = []
+
+    # Reattach REAL values; keep only msisdns that actually exist; drop fabricated ones.
+    out, seen = [], set()
+    for r in ranked if isinstance(ranked, list) else []:
+        m = str(r.get("msisdn", "")).strip() if isinstance(r, dict) else ""
+        if m in merged and m not in seen:
+            seen.add(m)
+            row = dict(merged[m])                       # real data
+            for k in ("composite_score", "score", "retention_offer"):
+                if isinstance(r, dict) and k in r:
+                    row[k] = r[k]                        # LLM-derived, not raw data
+            out.append(row)
+
+    # Fallback: LLM gave nothing usable → return the real merged rows as-is
+    if not out:
+        out = [dict(v, msisdn=m) for m, v in sample][:20]
+    return out or None
 
 
 # ── Grounded recommendation context ─────────────────────────────────────
@@ -2580,6 +2650,10 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
             text_only = re.sub(r'\|.*\|', '', text_only, flags=re.MULTILINE)      # tables
             text_only = re.sub(r'\n{3,}', '\n\n', text_only).strip()              # excess newlines
 
+            # Grounding guard — regenerate from the real query rows (in `context`) if
+            # the answer cites numbers that aren't in the data (text-chain path).
+            text_only = _ground_text(text_only, context, question)
+
             # For treemap questions, ALWAYS build chart from query results — never rely on model JSON
             if is_treemap and context:
                 chart_spec = _build_treemap_from_context(context)
@@ -2590,6 +2664,7 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
             # Final fallback: ask LLM to generate chart spec from prose
             if chart_spec is None:
                 chart_spec = _to_chart_spec(text_only, question)
+            chart_spec = _fix_id_axis_chart(chart_spec)   # IDs on x-axis → names + sorted
 
             # Recommendations fallback — only fires when the data has an actionable angle
             _actionable_signals = [
@@ -3745,8 +3820,71 @@ def _try_text_conclude(text: str):
     return d if isinstance(d, dict) and "text" in d else None
 
 
+def _dedupe_repeats(text: str) -> str:
+    """Collapse an answer that repeats the same sentence(s) back-to-back — Qwen
+    sometimes emits its whole answer several times. Keeps the first occurrence of
+    each distinct sentence, preserving order. Only exact-duplicate sentences are
+    dropped, so legitimately repeated numbers in different sentences survive."""
+    parts = re.split(r'(?<=[.!?])\s+', (text or "").strip())
+    seen, out = set(), []
+    for p in parts:
+        key = re.sub(r'\s+', ' ', p.strip().lower())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(p.strip())
+    return " ".join(out).strip()
+
+
+def _grounding_issues(text: str, results_blob: str):
+    """Return (ungrounded_numbers, total_significant): significant numbers cited in
+    `text` that do NOT appear in the query results. Conservative — skips years and
+    small integers, matches by rounding (so 80.6 grounds to data 80.613). A high
+    unmatched fraction means the model stated numbers it didn't get from its rows."""
+    if not results_blob:
+        return [], 0
+    data = set()
+    for tok in re.findall(r'-?\d[\d,]*\.?\d*', results_blob):
+        try: data.add(float(tok.replace(",", "")))
+        except ValueError: pass
+    if not data:
+        return [], 0
+    ungrounded, total = [], 0
+    for tok in re.findall(r'-?\d[\d,]*\.?\d*', text):
+        raw = tok.replace(",", "")
+        try: n = float(raw)
+        except ValueError: continue
+        if "." not in raw and (n < 1000 or 1900 <= n <= 2099 or len(raw.lstrip('-')) >= 7):
+            continue  # skip small counts / ordinals / years / ID-like long ints (msisdns)
+        total += 1
+        dec = len(raw.split(".")[1]) if "." in raw else 0
+        grounded = any(round(d, dec) == round(n, dec) or abs(d - n) <= max(0.01, 0.01 * abs(n))
+                       for d in data)
+        if not grounded:
+            ungrounded.append(n)
+    return ungrounded, total
+
+
+def _ground_text(text: str, results_blob: str, question: str) -> str:
+    """If the answer cites numbers absent from the query results (confabulation),
+    regenerate it once using ONLY the real rows. Shared by the tools + text paths."""
+    ung, tot = _grounding_issues(text, results_blob)
+    if tot and len(ung) >= 2 and len(ung) >= 0.5 * tot:
+        print(f"[Grounding] {len(ung)}/{tot} cited numbers absent from results — regenerating")
+        regen = _llm(
+            "Restate the analysis using ONLY numbers that appear in the provided query results. "
+            "Do not invent figures or extrapolate beyond the data. 3-5 plain sentences, no markdown.",
+            f"Question: {question}\nQuery results (the ONLY valid numbers):\n{results_blob[:4000]}\n\n"
+            f"Draft (may contain wrong numbers): {text}\n\nCorrected answer:",
+            max_tokens=400, allow_thinking=False,
+        ).strip()
+        if regen and not regen.startswith("ERROR"):
+            return _dedupe_repeats(regen)
+    return text
+
+
 def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
-                    is_treemap: bool, last_sql: str, steps_log: list) -> dict:
+                    is_treemap: bool, last_sql: str, steps_log: list,
+                    results_blob: str = "") -> dict:
     """Turn a `conclude` tool input into the result dict (same post-processing
     the text path does: currency/markdown cleanup, treemap build, export SQL)."""
     text = (inp.get("text") or "").strip()
@@ -3763,12 +3901,17 @@ def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'\*(.*?)\*', r'\1', text)
     text = re.sub(r'^[-*]\s+', '', text, flags=re.MULTILINE).strip()
+    text = _dedupe_repeats(text)   # collapse Qwen's repeated-answer output
+
+    # Grounding guard — regenerate from real rows if the answer cites absent numbers
+    text = _ground_text(text, results_blob, question)
 
     chart = inp.get("chart") or None
     if is_treemap and treemap_ctx:
         built = _build_treemap_from_context(treemap_ctx)
         if built:
             chart = built
+    chart = _fix_id_axis_chart(chart)   # IDs on x-axis → names + sorted ranking
 
     extract_sql = None
     if last_sql and re.search(r'\b(subscribers|devices|subscriber_technology|cells|sites)\b', last_sql, re.I):
@@ -3834,14 +3977,20 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
 
     is_treemap = any(w in q_lower for w in ("drilldown", "drill down", "drill-down", "tree", "treemap", "hierarchy"))
 
-    _prior = _memory_context()
-    user_text = (f"Conversation so far:\n{_prior}\n\n" if _prior else "") + f"Question: {question}"
-    messages = [{"role": "user", "content": [{"text": user_text}]}]
+    # Verbatim context window for the CURRENT conversation: feed the real prior turns
+    # (not a lossy summary) so the agent remembers exactly what was said this session.
+    # _conv_history() already ends with this turn's user message (appended in run_agent);
+    # drop that and re-add the resolved question so it isn't duplicated.
+    _hist = _conv_history()
+    _prior_turns = _hist[:-1] if (_hist and _hist[-1].get("role") == "user") else _hist
+    messages = [dict(m) for m in _prior_turns]
+    messages.append({"role": "user", "content": [{"text": f"Question: {question}"}]})
 
     last_sql = None
     steps_log = []
     seen = set()
     treemap_ctx = ""
+    results_blob = ""   # accumulated query rows, for the grounding check at conclude
 
     for step in range(max_steps):
         if _stop_event and _stop_event.is_set():
@@ -3868,7 +4017,14 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
             cd = _try_text_conclude(joined)
             if cd:
                 print("[Tools v2] salvaged text-emitted conclude → clean result")
-                finished = _finalize_tools(cd, question, treemap_ctx, is_treemap, last_sql, steps_log)
+                finished = _finalize_tools(cd, question, treemap_ctx, is_treemap, last_sql, steps_log, results_blob)
+                _cache_store(question, finished)
+                return finished
+            # Plain-prose final answer (no tool call, not JSON) once we already have data:
+            # deliver it instead of looping to step exhaustion. _finalize_tools dedupes repeats.
+            if last_sql and '"text"' not in joined and len(_dedupe_repeats(joined)) >= 120:
+                print("[Tools v2] salvaged plain-prose answer → final")
+                finished = _finalize_tools({"text": joined}, question, treemap_ctx, is_treemap, last_sql, steps_log, results_blob)
                 _cache_store(question, finished)
                 return finished
             if joined and _streaming_queue:   # reasoning only → thinking panel
@@ -3893,7 +4049,7 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
 
             if name == "conclude":
                 print("[Tools v2] conclude tool called")
-                finished = _finalize_tools(inp, question, treemap_ctx, is_treemap, last_sql, steps_log)
+                finished = _finalize_tools(inp, question, treemap_ctx, is_treemap, last_sql, steps_log, results_blob)
                 break
             if name == "propose_action":
                 finished = {"type": "proposal", "text": (inp.get("description") or "").strip(), "steps": steps_log}
@@ -3943,6 +4099,7 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                     tool_results.append((tid, f"{_n} rows: {json.dumps(sample, default=str)}"
                                               + (f" (showing {cap} of {_n})" if _n > cap else "")))
                     steps_log.append(f"[sql {_n}] {sql[:90]}")
+                    results_blob += json.dumps(sample, default=str)
                     if is_treemap:
                         treemap_ctx += f"\nResults ({_n} rows): {json.dumps(sample, default=str)}\n"
                 if _streaming_queue:

@@ -519,3 +519,21 @@ db: OP
 sql: SELECT c.campaign_name, sl.msisdn, sl.inbound_text, cv.value_segment, cv.arpu FROM sms_log sl JOIN campaigns c ON sl.campaign_id=c.campaign_id LEFT JOIN customer_value cv ON sl.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM customer_value) WHERE sl.response='query' ORDER BY cv.arpu DESC
 note: response='query' = interested-but-undecided subscribers — prime follow-up targets. Join customer_value (latest month) to prioritise by ARPU/segment. These are the people a follow-up campaign should target.
 ==END==
+
+==DOC==
+title: Customer experience issues this week and churn impact (per subscriber)
+tags: customer issues experience problems today this week streaming quality poor qoe complaints interruption outage why churn rising retention save subscriber upsell
+question: What issues did this customer have recently? Any problems with subscriber X? Why is their churn risk rising?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.msisdn, op.customers.full_name, s.region, cv.value_segment, cv.arpu, cv.churn_risk_score, cv.churn_label, (SELECT COUNT(*) FROM qoe_daily q WHERE q.msisdn=s.msisdn AND q.experience_label='poor' AND q.date>=date((SELECT MAX(date) FROM qoe_daily),'-7 days')) AS poor_qoe_days_7d, (SELECT COUNT(*) FROM complaints c WHERE c.msisdn=s.msisdn AND c.date>=date((SELECT MAX(date) FROM qoe_daily),'-7 days')) AS complaints_7d, (SELECT COUNT(*) FROM op.service_interruptions si WHERE si.msisdn=s.msisdn AND si.date>=date((SELECT MAX(date) FROM qoe_daily),'-7 days')) AS interruptions_7d FROM subscribers s JOIN op.customer_value cv ON s.msisdn=cv.msisdn AND cv.month=(SELECT MAX(month) FROM op.customer_value) JOIN op.customers ON s.msisdn=op.customers.msisdn WHERE s.msisdn='REPLACE_WITH_MSISDN'
+note: Per-customer experience digest. qoe_daily (network DB): experience_label 'poor' = a bad service day. complaints (network DB) and op.service_interruptions (operator DB) are dated events. Recent poor QoE / complaints / interruptions are what raise cv.churn_risk_score (the simulator adds an experience penalty on top of the usage churn model). Anchor "recent" to date((SELECT MAX(date) FROM qoe_daily),'-7 days'). Replace the msisdn filter with the subscriber asked about.
+==END==
+
+==DOC==
+title: High-value customers at churn risk from recent service issues (retention targets)
+tags: high value customers at risk service issues poor experience churn save retention upsell who should we contact proactive gold platinum HVC network problems
+question: Which high-value customers are at risk because of recent network issues? Who should we proactively save?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.msisdn, op.customers.full_name, s.region, cv.value_segment, cv.arpu, cv.churn_risk_score, COUNT(DISTINCT q.date) AS poor_qoe_days FROM op.customer_value cv JOIN subscribers s ON cv.msisdn=s.msisdn JOIN op.customers ON cv.msisdn=op.customers.msisdn JOIN qoe_daily q ON cv.msisdn=q.msisdn AND q.experience_label='poor' AND q.date>=date((SELECT MAX(date) FROM qoe_daily),'-7 days') WHERE cv.month=(SELECT MAX(month) FROM op.customer_value) AND cv.value_segment IN ('gold','platinum') GROUP BY cv.msisdn ORDER BY cv.churn_risk_score DESC, poor_qoe_days DESC LIMIT 20
+note: The proactive retention/upsell list: gold/platinum customers who had poor experience days in the last week, ranked by churn risk. These are the ones whose churn is being driven by network experience (not just usage), so a retention offer + network fix (or a 5G/VoLTE upsell to a better layer) is the play. Join qoe_daily (network DB) to customer_value/customers (operator DB).
+==END==

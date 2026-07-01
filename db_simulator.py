@@ -1077,14 +1077,96 @@ def _rescore_churn(msisdn_list, month, op_conn, sc_conn):
     X = np.array(rows, dtype=np.float32)
     scores = _churn_model.predict_proba(X)[:, 1]
 
+    # ── Experience penalty ──────────────────────────────────────────────
+    # The usage model above ignores network experience. Recent poor QoE,
+    # complaints, and service interruptions push churn risk up on top of it
+    # (clipped to 1.0), so "service issues raised this customer's churn" is
+    # real in the data — see simulate_experience_incident.
+    since = (today - timedelta(days=7)).isoformat()
+    qoe_bad, compl, intr = defaultdict(int), defaultdict(int), defaultdict(int)
+    try:
+        for m, cnt in sc_conn.execute(
+            f"SELECT msisdn, COUNT(*) FROM qoe_daily WHERE msisdn IN ({placeholders}) "
+            f"AND experience_label='poor' AND date>=? GROUP BY msisdn", msisdn_list + [since]):
+            qoe_bad[m] = cnt
+        for m, cnt in sc_conn.execute(
+            f"SELECT msisdn, COUNT(*) FROM complaints WHERE msisdn IN ({placeholders}) "
+            f"AND date>=? GROUP BY msisdn", msisdn_list + [since]):
+            compl[m] = cnt
+        for m, cnt in op_conn.execute(
+            f"SELECT msisdn, COUNT(*) FROM service_interruptions WHERE msisdn IN ({placeholders}) "
+            f"AND date>=? GROUP BY msisdn", msisdn_list + [since]):
+            intr[m] = cnt
+    except Exception:
+        pass
+
     for i, msisdn in enumerate(msisdn_list):
         s = float(scores[i])
+        penalty = min(0.40, 0.05 * qoe_bad.get(msisdn, 0)
+                            + 0.10 * compl.get(msisdn, 0)
+                            + 0.07 * intr.get(msisdn, 0))
+        s = min(1.0, s + penalty)
         label = "high" if s >= _churn_p90 else "medium" if s >= _churn_p70 else "low"
         op_conn.execute("""
             UPDATE customer_value SET churn_risk_score=?, churn_label=?
             WHERE msisdn=? AND month=?
         """, (round(s, 4), label, msisdn, month))
     op_conn.commit()
+
+
+_INCIDENT_CAUSES = [
+    ("Cell congestion",        "video streaming"),
+    ("Backhaul degradation",   "mobile data"),
+    ("Signal interference",    "voice calls"),
+    ("Site outage",            "all services"),
+    ("Throughput throttling",  "video streaming"),
+]
+
+def simulate_experience_incident(verbose=False):
+    """Hit a few HIGH-VALUE customers with a coherent service-degradation episode today:
+    poor QoE on video+gaming, a service interruption, and sometimes a complaint — all from
+    one root cause. Recent poor experience feeds the churn penalty in _rescore_churn, so the
+    affected customer's churn risk visibly rises. This is the per-customer 'issues today ->
+    churn up' signal the agent reports for retention/upsell."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    targets = op_query("""
+        SELECT msisdn FROM customer_value
+        WHERE month=(SELECT MAX(month) FROM customer_value)
+          AND value_segment IN ('gold','platinum')
+        ORDER BY RANDOM() LIMIT 4
+    """)
+    affected = []
+    for (msisdn,) in targets:
+        cause, service = random.choice(_INCIDENT_CAUSES)
+        # poor QoE today for video + gaming (high latency, low throughput, score ~1.5)
+        for app in ("video", "gaming"):
+            sc_write("""
+                INSERT INTO qoe_daily VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(msisdn, date, app_type) DO UPDATE SET
+                    avg_latency_ms=excluded.avg_latency_ms,
+                    avg_throughput_mbps=excluded.avg_throughput_mbps,
+                    experience_score=excluded.experience_score,
+                    experience_label=excluded.experience_label
+            """, (msisdn, today, app, random.randint(150, 260),
+                  round(random.uniform(0.5, 2.5), 2), round(random.uniform(1.2, 2.2), 2), "poor"))
+        # a service interruption (operator DB)
+        op_write("""INSERT INTO service_interruptions (msisdn, date, duration_min, cause, affected_service)
+                    VALUES (?,?,?,?,?)""", (msisdn, today, random.randint(15, 120), cause, service))
+        # sometimes the customer complains (network DB)
+        if random.random() < 0.5:
+            sc_write("""INSERT INTO complaints (msisdn, date, category, description, status)
+                        VALUES (?,?,?,?, 'open')""",
+                     (msisdn, today, service, f"{cause} affecting {service}"))
+        affected.append(msisdn)
+        if verbose:
+            print(f"  [EXPERIENCE] {msisdn}: {cause} -> poor {service}")
+
+    # rescore the affected customers now so churn reflects the new issues immediately
+    if _churn_model and affected:
+        month = datetime.now().strftime("%Y-%m")
+        oc = sqlite3.connect(OP_DB); sc = sqlite3.connect(SC_DB)
+        _rescore_churn(affected, month, oc, sc)
+        oc.close(); sc.close()
 
 
 def simulate_arpu_update(verbose=False):
@@ -1668,6 +1750,7 @@ def main():
                 simulate_technology_migration(args.verbose)
                 simulate_volte_activation(args.verbose)
                 simulate_congestion_incident(args.verbose)
+                simulate_experience_incident(args.verbose)   # HVC service issues -> churn up
 
             # Every 5 ticks
             if tick_count % 5 == 0:

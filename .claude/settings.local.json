@@ -6,7 +6,30 @@
       "WebSearch",
       "WebFetch(domain:docs.ollama.com)",
       "Bash(python -c ':*)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(python \"C:/Users/M50057~1/AppData/Local/Temp/claude/d--Dev-SmartCareLLM/b7a3ae0b-3111-423b-884d-b509095e7ac6/scratchpad/build_deck.py\")",
+      "Bash(python -c \"from pptx import Presentation; p=Presentation\\('NetworkAnalyzer_Solution_Overview.pptx'\\); print\\('rebuilt:', len\\(p.slides\\), 'slides'\\)\")",
+      "Bash(python -m py_compile manim_scenes.py)",
+      "Bash(/d/Dev/SmartCareLLM/networkanalyzer-env/Scripts/python.exe --version)",
+      "Bash(/d/Dev/SmartCareLLM/networkanalyzer-env/Scripts/python.exe -m manim --version)",
+      "Bash(./networkanalyzer-env/Scripts/python.exe -m manim -ql --disable_caching manim_scenes.py Architecture)",
+      "Bash(timeout 200 ./networkanalyzer-env/Scripts/python.exe -m manim -ql --disable_caching archive/networkanalyzer_presentation.py S1_Title)",
+      "Bash(timeout 220 ./networkanalyzer-env/Scripts/python.exe -m manim -ql --disable_caching archive/networkanalyzer_presentation.py S2_Architecture)",
+      "Bash(timeout 150 ./networkanalyzer-env/Scripts/python.exe -m manim -ql -s --disable_caching archive/networkanalyzer_presentation.py S2_Architecture)",
+      "Bash(timeout 160 ./networkanalyzer-env/Scripts/python.exe -m manim -ql -s --disable_caching archive/networkanalyzer_presentation.py S2_Architecture)",
+      "Bash(cd /d/Dev/SmartCareLLM/static && sed -i \\\\ *)",
+      "Bash(node --check js/main.js)",
+      "Bash(node --check js/charts.js)",
+      "Bash(node --check js/subscribers.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/ --max-time 3)",
+      "Bash(curl -s http://localhost:8000/static/style.css?v=6 --max-time 3)",
+      "Bash(./networkanalyzer-env/Scripts/python.exe -m py_compile NetworkAnalyzer_agent_bedrock.py)",
+      "Bash(python -c \"import json; json.load\\(open\\('schema_graph.json'\\)\\); print\\('schema_graph.json OK'\\)\")",
+      "Bash(python -c \"import sqlite3,os; print\\('NetworkAnalyzer_new.db' , os.path.exists\\('NetworkAnalyzer_new.db'\\)\\); print\\('operator_new.db', os.path.exists\\('operator_new.db'\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile db_simulator.py server.py)",
+      "Bash(python -m py_compile server.py)",
+      "Bash(node --check static/js/main.js)"
     ]
   }
 }

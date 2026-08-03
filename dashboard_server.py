@@ -388,3 +388,125 @@ def camp_opportunities():
         {"key": "volte_sunset", "title": "VoLTE Sunset",   "count": volte,     "desc": "VoLTE-capable device on 3G, VoLTE not yet activated"},
         {"key": "hvc_upsell",   "title": "HVC Upsell",     "count": hvc,       "desc": "Gold/platinum customers not on a 5G plan"},
     ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  QUERY BUILDER  (no-SQL, dropdown-driven SELECT tester)
+# ══════════════════════════════════════════════════════════════════════════════
+from fastapi import HTTPException
+
+_QB_OPS = {"=", "!=", ">", "<", ">=", "<=", "LIKE"}
+_QB_AGG = {"COUNT", "AVG", "SUM", "MIN", "MAX"}
+_qb_schema_cache: dict = {}
+
+
+def _qb_schema():
+    """Introspect both DBs → {database: {table: [columns]}}. Cached."""
+    if _qb_schema_cache:
+        return _qb_schema_cache
+    for name, path in (("network", SC_DB), ("operator", OP_DB)):
+        conn = sqlite3.connect(path)
+        tbls = {}
+        for (t,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+            tbls[t] = [r[1] for r in conn.execute(f'PRAGMA table_info("{t}")')]
+        conn.close()
+        _qb_schema_cache[name] = tbls
+    return _qb_schema_cache
+
+
+def _qb_resolve(database):
+    schema = _qb_schema()
+    if database not in schema:
+        raise HTTPException(400, "unknown database")
+    return (SC_DB if database == "network" else OP_DB), schema[database]
+
+
+@app.get("/api/qb/schema")
+def qb_schema():
+    return JSONResponse(_qb_schema())
+
+
+@app.get("/api/qb/distinct")
+def qb_distinct(database: str, table: str, column: str):
+    path, schema = _qb_resolve(database)
+    if table not in schema or column not in schema[table]:
+        raise HTTPException(400, "unknown table/column")
+    conn = sqlite3.connect(path)
+    n = conn.execute(f'SELECT COUNT(DISTINCT "{column}") FROM "{table}"').fetchone()[0]
+    vals = []
+    if n and n <= 60:   # only offer a value dropdown for low-cardinality columns
+        vals = [r[0] for r in conn.execute(
+            f'SELECT DISTINCT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL ORDER BY 1 LIMIT 60')]
+    conn.close()
+    return JSONResponse({"count": n, "values": vals})
+
+
+@app.post("/api/qb/run")
+def qb_run(body: dict):
+    """Build and run a SELECT from dropdown selections. SELECT-only; every table/
+    column/operator is validated against the live schema (no injection surface)."""
+    path, schema = _qb_resolve(body.get("database", ""))
+    table = body.get("table", "")
+    if table not in schema:
+        raise HTTPException(400, "unknown table")
+    cols_ok = set(schema[table])
+
+    def ck(c):
+        if c != "*" and c not in cols_ok:
+            raise HTTPException(400, f"unknown column: {c}")
+
+    group_by = [c for c in (body.get("group_by") or []) if c]
+    agg      = body.get("aggregate") or None
+    columns  = [c for c in (body.get("columns") or []) if c]
+
+    sel = []
+    for c in group_by:
+        ck(c); sel.append(f'"{c}"')
+    order_alias = None
+    if agg:
+        func = str(agg.get("func", "")).upper()
+        acol = agg.get("column", "*")
+        if func not in _QB_AGG:
+            raise HTTPException(400, "bad aggregate")
+        if acol != "*":
+            ck(acol)
+        order_alias = f'{func.lower()}_{"all" if acol == "*" else acol}'
+        sel.append(f'{func}({"*" if acol == "*" else chr(34)+acol+chr(34)}) AS {order_alias}')
+    if not agg:
+        for c in columns:
+            ck(c); sel.append(f'"{c}"')
+    if not sel:
+        sel = ["*"]
+
+    sql = f'SELECT {", ".join(sel)} FROM "{table}"'
+    args = []
+    for fl in (body.get("filters") or []):
+        c, op, v = fl.get("column"), fl.get("op"), fl.get("value")
+        if not c:
+            continue
+        ck(c)
+        if op not in _QB_OPS:
+            raise HTTPException(400, "bad operator")
+        sql += (" WHERE " if "WHERE" not in sql else " AND ") + f'"{c}" {op} ?'
+        args.append(f"%{v}%" if op == "LIKE" else v)
+    if group_by:
+        sql += " GROUP BY " + ", ".join(f'"{c}"' for c in group_by)
+    ob = body.get("order_by") or {}
+    oc = ob.get("column")
+    if oc:
+        d = "DESC" if str(ob.get("dir", "")).upper() == "DESC" else "ASC"
+        if oc in cols_ok:
+            sql += f' ORDER BY "{oc}" {d}'
+        elif oc == order_alias:
+            sql += f' ORDER BY {oc} {d}'
+    limit = max(1, min(int(body.get("limit") or 100), 1000))
+    sql += f" LIMIT {limit}"
+
+    conn = sqlite3.connect(path); conn.row_factory = sqlite3.Row
+    try:
+        rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    except Exception as e:
+        conn.close()
+        return JSONResponse({"error": str(e), "sql": sql})
+    conn.close()
+    return JSONResponse({"sql": sql, "rows": rows})

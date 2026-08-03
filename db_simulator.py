@@ -517,7 +517,39 @@ def _ensure_new_tables():
             resolution_days INTEGER
         );
 
+        -- Live service-experience incidents with a full lifecycle: each row is
+        -- one issue that OPENS (status='active', started_at stamped to the minute)
+        -- and later SELF-HEALS (status='resolved', resolved_at stamped). "Right
+        -- now" = WHERE status='active'; the historical timeline survives forever
+        -- via started_at/resolved_at. Segment/region/is_hvc are snapshotted at
+        -- open time so "which HVCs have an active streaming issue" is single-table.
+        CREATE TABLE IF NOT EXISTS experience_incidents (
+            incident_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            msisdn                 TEXT    NOT NULL,
+            value_segment          TEXT,
+            is_hvc                 INTEGER DEFAULT 0,
+            region                 TEXT,
+            affected_service       TEXT,
+            root_cause             TEXT,
+            severity               TEXT,
+            started_at             TEXT    NOT NULL,
+            expected_resolution_at TEXT,
+            resolved_at            TEXT,
+            status                 TEXT    DEFAULT 'active',
+            duration_min           INTEGER,
+            complaint_id           INTEGER,
+            cell_id                TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_exp_inc_status  ON experience_incidents(status);
+        CREATE INDEX IF NOT EXISTS idx_exp_inc_msisdn  ON experience_incidents(msisdn);
+        CREATE INDEX IF NOT EXISTS idx_exp_inc_started ON experience_incidents(started_at);
     """)
+    # cell_id — the offending cell (for flashing the site on the coverage map).
+    # Guarded ALTER so DBs that already have the table (created before this column) upgrade.
+    try:
+        sc.execute("ALTER TABLE experience_incidents ADD COLUMN cell_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     sc.commit()
     sc.close()
 
@@ -768,6 +800,51 @@ def backfill_new_tables(verbose=False):
             op_write_many(
                 "INSERT OR IGNORE INTO service_interruptions (msisdn,date,duration_min,cause,affected_service) VALUES(?,?,?,?,?)",
                 si_rows
+            )
+
+    # ── Seed historical experience incidents (mostly resolved, a few live) ──
+    existing_inc = sc_query("SELECT COUNT(*) FROM experience_incidents")[0][0]
+    if existing_inc < 30:
+        now = datetime.now()
+        # HVC pool: gold/platinum with their region snapshot
+        hvc_pool = op_query("""
+            SELECT msisdn, value_segment, is_hvc FROM customer_value
+            WHERE month=(SELECT MAX(month) FROM customer_value)
+              AND value_segment IN ('gold','platinum')
+            ORDER BY RANDOM() LIMIT 200
+        """)
+        region_map = dict(sc_query("SELECT msisdn, region FROM subscribers"))
+        cell_map   = dict(sc_query("SELECT msisdn, current_cell_id FROM subscriber_technology"))
+        inc_rows = []
+        for msisdn, segment, is_hvc in hvc_pool:
+            if random.random() > 0.35:      # ~35% of the pool had a past incident
+                continue
+            cause, service, severity = random.choice(_INCIDENT_SCENARIOS)
+            lo, hi  = _INCIDENT_DURATION_MIN[severity]
+            dur_min = random.randint(lo, hi)
+            # started sometime in the past 14 days (bias a couple to today)
+            mins_ago = random.choice([random.randint(20, 240)] * 3 + [random.randint(240, 14 * 1440)])
+            start    = now - timedelta(minutes=mins_ago)
+            eta      = start + timedelta(minutes=dur_min)
+            started_at = start.strftime("%Y-%m-%d %H:%M:%S")
+            eta_str    = eta.strftime("%Y-%m-%d %H:%M:%S")
+            # if the heal window already passed it's resolved; else still active
+            if eta <= now:
+                status, resolved_at = "resolved", eta_str
+            else:
+                status, resolved_at = "active", None
+            inc_rows.append((msisdn, segment, is_hvc, region_map.get(msisdn), service,
+                             cause, severity, started_at, eta_str, resolved_at, status, dur_min,
+                             None, cell_map.get(msisdn)))
+        if inc_rows:
+            print(f"  [BACKFILL] experience_incidents: seeding {len(inc_rows):,} rows …")
+            sc_write_many(
+                """INSERT INTO experience_incidents
+                   (msisdn, value_segment, is_hvc, region, affected_service, root_cause,
+                    severity, started_at, expected_resolution_at, resolved_at, status,
+                    duration_min, complaint_id, cell_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                inc_rows
             )
 
     print("  [BACKFILL] New tables complete")
@@ -1078,33 +1155,32 @@ def _rescore_churn(msisdn_list, month, op_conn, sc_conn):
     scores = _churn_model.predict_proba(X)[:, 1]
 
     # ── Experience penalty ──────────────────────────────────────────────
-    # The usage model above ignores network experience. Recent poor QoE,
-    # complaints, and service interruptions push churn risk up on top of it
-    # (clipped to 1.0), so "service issues raised this customer's churn" is
-    # real in the data — see simulate_experience_incident.
-    since = (today - timedelta(days=7)).isoformat()
-    qoe_bad, compl, intr = defaultdict(int), defaultdict(int), defaultdict(int)
+    # The usage model above ignores network experience. This penalty tracks the
+    # customer's LIVE experience so churn RISES while an incident is open and
+    # RELAXES once it self-heals (see simulate_experience_incident /
+    # simulate_incident_resolution). It's driven by ACTIVE incidents + still-OPEN
+    # complaints — not by the persistent daily QoE evidence, which never clears.
+    # So "service issues raised this customer's churn" is real, and so is the
+    # recovery. Clipped to 1.0.
+    _SEV_WEIGHT = {"critical": 0.30, "major": 0.18, "minor": 0.10}
+    active_pen, open_compl = defaultdict(float), defaultdict(int)
     try:
-        for m, cnt in sc_conn.execute(
-            f"SELECT msisdn, COUNT(*) FROM qoe_daily WHERE msisdn IN ({placeholders}) "
-            f"AND experience_label='poor' AND date>=? GROUP BY msisdn", msisdn_list + [since]):
-            qoe_bad[m] = cnt
+        for m, sev, cnt in sc_conn.execute(
+            f"SELECT msisdn, severity, COUNT(*) FROM experience_incidents "
+            f"WHERE msisdn IN ({placeholders}) AND status='active' "
+            f"GROUP BY msisdn, severity", msisdn_list):
+            active_pen[m] += _SEV_WEIGHT.get(sev, 0.10) * cnt
         for m, cnt in sc_conn.execute(
             f"SELECT msisdn, COUNT(*) FROM complaints WHERE msisdn IN ({placeholders}) "
-            f"AND date>=? GROUP BY msisdn", msisdn_list + [since]):
-            compl[m] = cnt
-        for m, cnt in op_conn.execute(
-            f"SELECT msisdn, COUNT(*) FROM service_interruptions WHERE msisdn IN ({placeholders}) "
-            f"AND date>=? GROUP BY msisdn", msisdn_list + [since]):
-            intr[m] = cnt
+            f"AND status IN ('open','in_progress') GROUP BY msisdn", msisdn_list):
+            open_compl[m] = cnt
     except Exception:
         pass
 
     for i, msisdn in enumerate(msisdn_list):
         s = float(scores[i])
-        penalty = min(0.40, 0.05 * qoe_bad.get(msisdn, 0)
-                            + 0.10 * compl.get(msisdn, 0)
-                            + 0.07 * intr.get(msisdn, 0))
+        penalty = min(0.40, active_pen.get(msisdn, 0.0)
+                            + 0.05 * open_compl.get(msisdn, 0))
         s = min(1.0, s + penalty)
         label = "high" if s >= _churn_p90 else "medium" if s >= _churn_p70 else "low"
         op_conn.execute("""
@@ -1114,58 +1190,244 @@ def _rescore_churn(msisdn_list, month, op_conn, sc_conn):
     op_conn.commit()
 
 
-_INCIDENT_CAUSES = [
-    ("Cell congestion",        "video streaming"),
-    ("Backhaul degradation",   "mobile data"),
-    ("Signal interference",    "voice calls"),
-    ("Site outage",            "all services"),
-    ("Throughput throttling",  "video streaming"),
+# (root_cause, affected_service, severity, scope, weight) — the experience-issue catalog.
+# affected_service is what the agent filters on ("streaming issues" -> 'video streaming').
+#
+# SCOPE = blast radius, and it matters: a power failure at a site does NOT take out one
+# unlucky platinum customer, it takes out EVERYONE on that site. Infrastructure faults are
+# 'cell'/'site' scoped and hit every active subscriber served there; only genuinely
+# per-customer faults (a policy throttle, their CDN route, their VoLTE bearer) are
+# 'subscriber' scoped. WEIGHT keeps site-wide outages rare, as they are in real life
+# (~3% of events) while per-subscriber niggles are the common case.
+_INCIDENT_SCENARIOS = [
+    ("Cell congestion",         "video streaming", "major",    "cell",        6),
+    ("Throughput throttling",   "video streaming", "minor",    "subscriber", 12),
+    ("CDN peering degradation", "video streaming", "major",    "subscriber", 10),
+    ("Backhaul degradation",    "mobile data",     "major",    "cell",        5),
+    ("Packet loss spike",       "mobile data",     "minor",    "subscriber", 10),
+    ("DNS resolver failure",    "mobile data",     "minor",    "subscriber",  8),
+    ("Signal interference",     "voice calls",     "minor",    "cell",        4),
+    ("VoLTE bearer drop",       "voice calls",     "major",    "subscriber",  8),
+    ("Site outage",             "all services",    "critical", "site",        1),
+    ("Power failure at site",   "all services",    "critical", "site",        1),
 ]
 
-def simulate_experience_incident(verbose=False):
-    """Hit a few HIGH-VALUE customers with a coherent service-degradation episode today:
-    poor QoE on video+gaming, a service interruption, and sometimes a complaint — all from
-    one root cause. Recent poor experience feeds the churn penalty in _rescore_churn, so the
-    affected customer's churn risk visibly rises. This is the per-customer 'issues today ->
-    churn up' signal the agent reports for retention/upsell."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    targets = op_query("""
-        SELECT msisdn FROM customer_value
-        WHERE month=(SELECT MAX(month) FROM customer_value)
-          AND value_segment IN ('gold','platinum')
-        ORDER BY RANDOM() LIMIT 4
+# A cell/site event writes one incident row PER AFFECTED SUBSCRIBER, so the budget counts
+# EVENTS, not rows. The map draws one ring per site either way.
+_MAX_NEW_EVENTS         = 3
+# Cap on blast radius — a backstop, not a modelling choice. The biggest site here serves
+# 472 subscribers (411 sites, median 116), so this covers every one of them OUTRIGHT: a
+# power failure takes out 100% of its site, not some fraction. That matters, because the
+# agent reports the ratio — a truncating cap made it narrate "25% of the site is offline",
+# which is an artifact, not a fact. Safe on params: SQLite allows 32766 and
+# _rescore_churn / _subscriber_snapshot bind one per affected msisdn.
+_MAX_AFFECTED_PER_EVENT = 500
+_COMPLAINT_RATE_BULK    = 0.12   # in a mass outage only some people actually complain
+
+# Demo-fast self-heal windows (real wall-clock minutes) by severity. Small
+# glitches clear fast; a site outage lingers — but everything resolves inside a
+# session so you can watch the loop close.
+_INCIDENT_DURATION_MIN = {
+    "minor":    (5, 12),
+    "major":    (10, 20),
+    "critical": (18, 30),
+}
+
+# Which qoe_daily app rows a service degrades — keeps the QoE evidence coherent.
+_SERVICE_APPS = {
+    "video streaming": ("video",),
+    "mobile data":     ("web", "gaming"),
+    "voice calls":     ("voip",),
+    "all services":    ("video", "gaming", "web", "voip"),
+}
+
+def _incident_targets(scope, active_now):
+    """Who does this fault ACTUALLY hit? Infrastructure faults take out every active
+    subscriber served by the cell/site; a per-subscriber fault hits one customer.
+    Anyone already carrying an active incident is skipped."""
+    if scope == "subscriber":
+        # per-customer faults: bias to gold/platinum (that's the retention story)
+        for (m,) in op_query("""
+            SELECT msisdn FROM customer_value
+            WHERE month=(SELECT MAX(month) FROM customer_value)
+              AND value_segment IN ('gold','platinum')
+            ORDER BY RANDOM() LIMIT 8
+        """):
+            if m not in active_now:
+                return [m]
+        return []
+
+    # Pick the cell/site via a random ACTIVE SUBSCRIBER rather than at random from the
+    # cell table: plenty of cells serve nobody (picking those would no-op the event), and
+    # going through subscribers weights selection by population — the busy cells are the
+    # ones that congest, which is what we want anyway.
+    seed = sc_query("""
+        SELECT st.current_cell_id FROM subscriber_technology st
+        JOIN subscribers s ON st.msisdn=s.msisdn
+        WHERE s.is_active=1 AND st.current_cell_id IS NOT NULL
+        ORDER BY RANDOM() LIMIT 1
     """)
-    affected = []
-    for (msisdn,) in targets:
-        cause, service = random.choice(_INCIDENT_CAUSES)
-        # poor QoE today for video + gaming (high latency, low throughput, score ~1.5)
-        for app in ("video", "gaming"):
-            sc_write("""
-                INSERT INTO qoe_daily VALUES(?,?,?,?,?,?,?)
-                ON CONFLICT(msisdn, date, app_type) DO UPDATE SET
-                    avg_latency_ms=excluded.avg_latency_ms,
-                    avg_throughput_mbps=excluded.avg_throughput_mbps,
-                    experience_score=excluded.experience_score,
-                    experience_label=excluded.experience_label
-            """, (msisdn, today, app, random.randint(150, 260),
-                  round(random.uniform(0.5, 2.5), 2), round(random.uniform(1.2, 2.2), 2), "poor"))
-        # a service interruption (operator DB)
-        op_write("""INSERT INTO service_interruptions (msisdn, date, duration_min, cause, affected_service)
-                    VALUES (?,?,?,?,?)""", (msisdn, today, random.randint(15, 120), cause, service))
-        # sometimes the customer complains (network DB)
-        if random.random() < 0.5:
-            sc_write("""INSERT INTO complaints (msisdn, date, category, description, status)
-                        VALUES (?,?,?,?, 'open')""",
-                     (msisdn, today, service, f"{cause} affecting {service}"))
-        affected.append(msisdn)
+    if not seed:
+        return []
+    seed_cell = seed[0][0]
+
+    if scope == "cell":
+        rows = sc_query("""
+            SELECT st.msisdn FROM subscriber_technology st
+            JOIN subscribers s ON st.msisdn=s.msisdn
+            WHERE st.current_cell_id=? AND s.is_active=1 LIMIT ?
+        """, (seed_cell, _MAX_AFFECTED_PER_EVENT))
+        return [m for (m,) in rows if m not in active_now]
+
+    # site: everyone across every cell on that site
+    rows = sc_query("""
+        SELECT st.msisdn FROM subscriber_technology st
+        JOIN subscribers s ON st.msisdn=s.msisdn
+        JOIN cells c ON st.current_cell_id=c.cell_id
+        WHERE c.site_id=(SELECT site_id FROM cells WHERE cell_id=?)
+          AND s.is_active=1 LIMIT ?
+    """, (seed_cell, _MAX_AFFECTED_PER_EVENT))
+    return [m for (m,) in rows if m not in active_now]
+
+
+def _subscriber_snapshot(msisdns):
+    """region + current cell (network DB) and value_segment / is_hvc (operator DB) for
+    everyone an incident hits — snapshotted onto each incident row so the UI and the
+    agent can filter by HVC/region/site without a cross-DB join."""
+    out = {}
+    if not msisdns:
+        return out
+    ph = ",".join("?" * len(msisdns))
+    for m, reg, cell in sc_query(
+        f"SELECT s.msisdn, s.region, st.current_cell_id FROM subscribers s "
+        f"JOIN subscriber_technology st ON s.msisdn=st.msisdn "
+        f"WHERE s.msisdn IN ({ph})", list(msisdns)):
+        out[m] = [reg, cell, None, 0]
+    for m, seg, hvc in op_query(
+        f"SELECT msisdn, value_segment, is_hvc FROM customer_value "
+        f"WHERE month=(SELECT MAX(month) FROM customer_value) AND msisdn IN ({ph})",
+        list(msisdns)):
+        if m in out:
+            out[m][2] = seg
+            out[m][3] = hvc or 0
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def simulate_experience_incident(verbose=False):
+    """OPEN coherent, timestamped service-degradation EVENTS.
+
+    Each event picks a fault (weighted) and hits everyone in its blast radius: a site
+    outage takes out the whole site, a cell fault the whole cell, a per-customer fault
+    one subscriber. Every affected subscriber gets an incident row (status='active',
+    started_at stamped to the second, expected_resolution_at in the near future) plus
+    coherent evidence — poor qoe_daily rows for the affected apps, a service
+    interruption, and a complaint from some of them — and their churn RISES while it's
+    open. simulate_incident_resolution() heals it later and relaxes churn. All writes
+    are batched: a site outage is ~120 subscribers, not 120 connections."""
+    now     = datetime.now()
+    today   = now.strftime("%Y-%m-%d")
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    active_now = {r[0] for r in sc_query(
+        "SELECT msisdn FROM experience_incidents WHERE status='active'")}
+
+    scenarios = [s[:4] for s in _INCIDENT_SCENARIOS]
+    weights   = [s[4]  for s in _INCIDENT_SCENARIOS]
+
+    all_affected = []
+    for _ in range(_MAX_NEW_EVENTS):
+        cause, service, severity, scope = random.choices(scenarios, weights=weights)[0]
+        targets = _incident_targets(scope, active_now)
+        if not targets:
+            continue
+
+        lo, hi  = _INCIDENT_DURATION_MIN[severity]
+        dur_min = random.randint(lo, hi)
+        eta     = (now + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
+        info    = _subscriber_snapshot(targets)
+        apps    = _SERVICE_APPS.get(service, ("video",))
+        # a single customer's own fault gets their attention; a mass outage doesn't
+        # generate 120 complaints
+        compl_rate = 0.7 if (scope == "subscriber" and severity in ("major", "critical")) \
+                         else (0.3 if scope == "subscriber" else _COMPLAINT_RATE_BULK)
+
+        inc_rows, qoe_rows, si_rows, comp_rows = [], [], [], []
+        for m in targets:
+            region, cell_id, segment, is_hvc = info.get(m, (None, None, None, 0))
+            inc_rows.append((m, segment, is_hvc, region, service, cause, severity,
+                             now_str, eta, dur_min, cell_id))
+            for app in apps:
+                qoe_rows.append((m, today, app, random.randint(150, 260),
+                                 round(random.uniform(0.5, 2.5), 2),
+                                 round(random.uniform(1.2, 2.2), 2), "poor"))
+            si_rows.append((m, today, dur_min, cause, service))
+            if random.random() < compl_rate:
+                comp_rows.append((m, today, service, f"{cause} affecting {service}"))
+            active_now.add(m)
+
+        sc_write_many("""INSERT INTO experience_incidents
+                         (msisdn, value_segment, is_hvc, region, affected_service, root_cause,
+                          severity, started_at, expected_resolution_at, status, duration_min, cell_id)
+                         VALUES(?,?,?,?,?,?,?,?,?, 'active', ?,?)""", inc_rows)
+        sc_write_many("""INSERT INTO qoe_daily VALUES(?,?,?,?,?,?,?)
+                         ON CONFLICT(msisdn, date, app_type) DO UPDATE SET
+                             avg_latency_ms=excluded.avg_latency_ms,
+                             avg_throughput_mbps=excluded.avg_throughput_mbps,
+                             experience_score=excluded.experience_score,
+                             experience_label=excluded.experience_label""", qoe_rows)
+        op_write_many("""INSERT INTO service_interruptions
+                         (msisdn, date, duration_min, cause, affected_service)
+                         VALUES(?,?,?,?,?)""", si_rows)
+        if comp_rows:
+            sc_write_many("""INSERT INTO complaints (msisdn, date, category, description, status)
+                             VALUES(?,?,?,?, 'open')""", comp_rows)
+
+        all_affected.extend(targets)
         if verbose:
-            print(f"  [EXPERIENCE] {msisdn}: {cause} -> poor {service}")
+            hvc_n = sum(1 for m in targets if info.get(m, (None, None, None, 0))[3])
+            print(f"  [INCIDENT+] {now_str[11:]} {severity} {cause} -> {service} [{scope}] "
+                  f"hit {len(targets)} subscriber(s) ({hvc_n} HVC), heals in ~{dur_min}m")
 
     # rescore the affected customers now so churn reflects the new issues immediately
-    if _churn_model and affected:
+    if _churn_model and all_affected:
+        month = now.strftime("%Y-%m")
+        oc = sqlite3.connect(OP_DB); sc = sqlite3.connect(SC_DB)
+        _rescore_churn(list(set(all_affected)), month, oc, sc)
+        oc.close(); sc.close()
+
+
+def simulate_incident_resolution(verbose=False):
+    """SELF-HEAL: close every active incident whose expected_resolution_at has
+    passed. Stamps resolved_at, flips status, resolves the linked complaint, and
+    re-scores churn so risk RELAXES now that the issue is over. The row stays in
+    the table forever, so the agent can still report 'today at 14:32 this HVC had
+    a streaming issue (resolved 14:49)'."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    due = sc_query("""
+        SELECT incident_id, msisdn, affected_service
+        FROM experience_incidents
+        WHERE status='active' AND expected_resolution_at <= ?
+    """, (now,))
+    if not due:
+        return
+
+    # batched: healing a site outage is ~120 rows, not 120 connections
+    sc_write_many("""UPDATE experience_incidents SET status='resolved', resolved_at=?
+                     WHERE incident_id=?""", [(now, i) for i, _, _ in due])
+    # close the complaint the fault provoked (bulk rows carry no complaint_id link)
+    sc_write_many("""UPDATE complaints SET status='resolved', resolution_days=0
+                     WHERE msisdn=? AND category=? AND status='open'""",
+                  [(m, svc) for _, m, svc in due])
+
+    healed = sorted({m for _, m, _ in due})
+    if verbose:
+        print(f"  [INCIDENT-] {now[11:]} resolved {len(due)} incident(s) "
+              f"across {len(healed)} subscriber(s)")
+
+    # churn relaxes now that the incidents are no longer active
+    if _churn_model and healed:
         month = datetime.now().strftime("%Y-%m")
         oc = sqlite3.connect(OP_DB); sc = sqlite3.connect(SC_DB)
-        _rescore_churn(affected, month, oc, sc)
+        _rescore_churn(healed, month, oc, sc)
         oc.close(); sc.close()
 
 
@@ -1676,6 +1938,8 @@ def print_status():
     active_camps = op_query("SELECT COUNT(*) FROM campaigns WHERE status='active'")[0][0]
     avg_arpu     = op_query("SELECT ROUND(AVG(arpu),2) FROM customer_value WHERE month=(SELECT MAX(month) FROM customer_value)")[0][0]
     poor_qoe     = sc_query("SELECT COUNT(DISTINCT msisdn) FROM qoe_daily WHERE experience_label='poor' AND date=date('now','-1 day')")[0][0]
+    active_inc   = sc_query("SELECT COUNT(*) FROM experience_incidents WHERE status='active'")[0][0]
+    active_hvc   = sc_query("SELECT COUNT(*) FROM experience_incidents WHERE status='active' AND is_hvc=1")[0][0]
 
     print(f"\n  [{now}] ── LIVE STATUS ──────────────────────────────")
     print(f"  Subscribers : {active_subs:,} active")
@@ -1684,6 +1948,7 @@ def print_status():
     print(f"  Campaigns   : {active_camps} active")
     print(f"  Avg ARPU    : {avg_arpu} Yuan")
     print(f"  Poor QoE    : {poor_qoe:,} users yesterday")
+    print(f"  Live issues : {active_inc} active incidents ({active_hvc} on HVCs)")
     print(f"  ────────────────────────────────────────────────────")
 
 
@@ -1736,6 +2001,7 @@ def main():
             simulate_kpi_fluctuation(args.verbose)
             simulate_alarm_trigger(args.verbose)
             simulate_alarm_clear(args.verbose)
+            simulate_incident_resolution(args.verbose)   # self-heal any due experience incidents
 
             # Every 2 ticks
             if tick_count % 2 == 0:

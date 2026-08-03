@@ -6,8 +6,8 @@
 <title>NetworkAnalyzer Copilot</title>
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Share+Tech+Mono&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=5">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css?v=7">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 </head>
@@ -16,31 +16,31 @@
 <!-- ═══════════════════════════ SIDEBAR ═══════════════════════════ -->
 <aside id="sidebar">
   <div class="sb-brand">
-    <div class="sb-logo">💠 NetworkAnalyzer</div>
+    <div class="sb-logo">NetworkAnalyzer</div>
     <div class="sb-sub">AI Copilot</div>
     <div id="ws-status" class="status-dot disconnected"></div>
   </div>
 
   <div class="sb-section">
-    <div class="sb-label">▸ ALERTS</div>
-    <button class="btn-outline" id="scan-btn" onclick="App.scanAlerts()">⚡ SCAN NETWORK</button>
+    <div class="sb-label">ALERTS</div>
+    <button class="btn-outline" id="scan-btn" onclick="App.scanAlerts()">Scan network</button>
     <div id="alerts-list"></div>
   </div>
 
   <div class="sb-section">
-    <div class="sb-label">▸ QUICK QUERIES</div>
+    <div class="sb-label">QUICK QUERIES</div>
     <div class="quick-grid">
-      <button class="btn-quick" onclick="App.quickQuery('5G upsell opportunities by region')">📶 5G Upsell</button>
-      <button class="btn-quick" onclick="App.quickQuery('3G sunset risk analysis by region')">📵 3G Sunset</button>
-      <button class="btn-quick" onclick="App.quickQuery('FWA candidates by region')">🏠 FWA Convert</button>
-      <button class="btn-quick" onclick="App.quickQuery('HVC customer status and ARPU breakdown')">💎 HVC Status</button>
-      <button class="btn-quick" onclick="App.quickQuery('Current network KPIs: throughput, drop rate, availability')">⚠️ Network KPIs</button>
-      <button class="btn-quick" onclick="App.quickQuery('Critical alarms by region and type')">🔔 Critical Alarms</button>
+      <button class="btn-quick" onclick="App.quickQuery('5G upsell opportunities by region')">5G Upsell</button>
+      <button class="btn-quick" onclick="App.quickQuery('3G sunset risk analysis by region')">3G Sunset</button>
+      <button class="btn-quick" onclick="App.quickQuery('FWA candidates by region')">FWA Convert</button>
+      <button class="btn-quick" onclick="App.quickQuery('HVC customer status and ARPU breakdown')">HVC Status</button>
+      <button class="btn-quick" onclick="App.quickQuery('Current network KPIs: throughput, drop rate, availability')">Network KPIs</button>
+      <button class="btn-quick" onclick="App.quickQuery('Critical alarms by region and type')">Critical Alarms</button>
     </div>
   </div>
 
   <div class="sb-section">
-    <button class="btn-danger" onclick="App.forgetMemory()">FORGET MEMORY</button>
+    <button class="btn-danger" onclick="App.forgetMemory()">Forget memory</button>
   </div>
 </aside>
 
@@ -48,30 +48,16 @@
 <div id="settings-overlay" onclick="App.closeSettings()"></div>
 <div id="settings-panel">
   <div class="sp-header">
-    <span class="sp-title">⚙ Settings</span>
+    <span class="sp-title">Settings</span>
     <button class="sp-close" onclick="App.closeSettings()">✕</button>
   </div>
 
-  <!-- Nation Theme -->
+  <!-- Appearance -->
   <div class="sp-section">
-    <div class="sp-label">NATION THEME</div>
-    <div class="sp-nations">
-      <button class="nation-btn" data-nation="water" onclick="App.setNation('water')">
-        <img src="/static/logo_water.jpg" alt="Water Tribe">
-        <span class="nation-btn-label">Water Tribe</span>
-      </button>
-      <button class="nation-btn" data-nation="earth" onclick="App.setNation('earth')">
-        <img src="/static/logo_earth.jpg" alt="Earth Kingdom">
-        <span class="nation-btn-label">Earth Kingdom</span>
-      </button>
-      <button class="nation-btn" data-nation="fire" onclick="App.setNation('fire')">
-        <img src="/static/logo_fire.jpg" alt="Fire Nation">
-        <span class="nation-btn-label">Fire Nation</span>
-      </button>
-      <button class="nation-btn" data-nation="air" onclick="App.setNation('air')">
-        <img src="/static/logo_air.jpg" alt="Air Nomads">
-        <span class="nation-btn-label">Air Nomads</span>
-      </button>
+    <div class="sp-label">APPEARANCE</div>
+    <div class="sp-themes">
+      <button class="theme-opt" data-theme="light" onclick="App.setTheme('light')">☀ Light</button>
+      <button class="theme-opt" data-theme="dark"  onclick="App.setTheme('dark')">🌙 Dark</button>
     </div>
   </div>
 
@@ -95,9 +81,6 @@
   </div>
 </div>
 
-<!-- Background overlay -->
-<div id="nation-bg"></div>
-
 <!-- ═══════════════════════════ MAIN ══════════════════════════════ -->
 <main id="main">
 
@@ -107,16 +90,17 @@
     <div class="kpi-card"><div class="kpi-val" id="k-alarms">—</div><div class="kpi-lbl">CRITICAL ALARMS</div></div>
     <div class="kpi-card"><div class="kpi-val" id="k-hvc">—</div><div class="kpi-lbl">HVC CUSTOMERS</div></div>
     <div class="kpi-card"><div class="kpi-val" id="k-fwa">—</div><div class="kpi-lbl">FWA CANDIDATES</div></div>
+    <button class="settings-gear" id="theme-toggle" onclick="App.toggleTheme()" title="Toggle light / dark">🌙</button>
     <button class="settings-gear" onclick="App.openSettings()" title="Settings">⚙</button>
   </div>
 
   <!-- Tab bar -->
   <nav id="tab-bar">
-    <button class="tab-btn active" data-tab="copilot">💠 COPILOT</button>
-    <button class="tab-btn" data-tab="network">📡 NETWORK</button>
-    <button class="tab-btn" data-tab="subscribers">👥 SUBSCRIBERS</button>
-    <button class="tab-btn" data-tab="commercial">💰 COMMERCIAL</button>
-    <button class="tab-btn" data-tab="campaigns">🎯 CAMPAIGNS</button>
+    <button class="tab-btn active" data-tab="copilot">Copilot</button>
+    <button class="tab-btn" data-tab="network">Network</button>
+    <button class="tab-btn" data-tab="subscribers">Subscribers</button>
+    <button class="tab-btn" data-tab="commercial">Commercial</button>
+    <button class="tab-btn" data-tab="campaigns">Campaigns</button>
   </nav>
 
   <!-- ── COPILOT TAB ── -->
@@ -127,35 +111,44 @@
       <div class="chat-col">
         <div id="chat-messages">
           <div class="chat-welcome">
-            <div class="welcome-title">READY FOR ANALYSIS</div>
+            <div class="welcome-title">How can I help?</div>
             <div class="welcome-sub">Ask about network KPIs · subscriber campaigns<br>5G upsell · FWA conversion · 3G migration</div>
           </div>
         </div>
         <div id="proposal-actions" style="display:none">
-          <button class="btn-confirm" onclick="App.confirm()">✅ CONFIRM</button>
-          <button class="btn-danger"  onclick="App.cancel()">❌ CANCEL</button>
+          <button class="btn-confirm" onclick="App.confirm()">Confirm</button>
+          <button class="btn-danger"  onclick="App.cancel()">Cancel</button>
         </div>
         <div id="chat-input-row">
           <textarea id="chat-input" rows="1" placeholder="Ask anything about your network or subscribers..."
                     onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();App.send()}"
                     oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
-<button class="btn-send" onclick="App.send()">SEND ▶</button>
-          <button class="btn-stop" id="btn-stop" onclick="App.stop()" style="display:none">■ STOP</button>
-          <button class="btn-continue" id="btn-continue" onclick="App.continueResponse()" style="display:none">▶▶ CONTINUE</button>
+<button class="btn-send" onclick="App.send()">Send</button>
+          <button class="btn-stop" id="btn-stop" onclick="App.stop()" style="display:none">Stop</button>
+          <button class="btn-continue" id="btn-continue" onclick="App.continueResponse()" style="display:none">Continue</button>
         </div>
       </div>
 
       <!-- Snapshot -->
       <div class="snapshot-col" id="snapshot-col">
-        <button class="snap-expand" onclick="App.toggleSnapshot()" title="Show panel">⟨ PANEL</button>
+        <button class="snap-expand" onclick="App.toggleSnapshot()" title="Show panel">⟨ Panel</button>
         <div class="snap-tabs">
-          <button class="snap-tab active" onclick="App.snapTab(this,'map')">COVERAGE</button>
-          <button class="snap-tab" onclick="App.snapTab(this,'network-snap')">NETWORK</button>
-          <button class="snap-tab" onclick="App.snapTab(this,'subs-snap')">SUBSCRIBERS</button>
-          <button class="snap-tab" onclick="App.snapTab(this,'comm-snap')">COMMERCIAL</button>
+          <button class="snap-tab active" onclick="App.snapTab(this,'map')">Coverage</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'network-snap')">Network</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'subs-snap')">Subscribers</button>
+          <button class="snap-tab" onclick="App.snapTab(this,'comm-snap')">Commercial</button>
           <button class="snap-collapse" onclick="App.toggleSnapshot()" title="Hide panel">⟩</button>
         </div>
-        <div id="snap-map"          class="snap-panel active"><div id="coverage-map" class="chart-box"></div></div>
+        <div id="snap-map"          class="snap-panel active">
+          <div class="map-toolbar">
+            <button id="issues-toggle" class="map-toggle" onclick="App.toggleIssuesOnly()"
+                    title="Show only cell sites with live issues">
+              <span class="map-toggle-dot"></span>Issues only<span id="issues-count" class="map-toggle-count"></span>
+            </button>
+            <span class="map-toolbar-hint">click a flashing site to diagnose</span>
+          </div>
+          <div id="coverage-map" class="chart-box"></div>
+        </div>
         <div id="snap-network-snap" class="snap-panel"><div id="snap-alarms-chart" class="chart-box"></div></div>
         <div id="snap-subs-snap"    class="snap-panel"><div id="snap-tech-chart"   class="chart-box"></div></div>
         <div id="snap-comm-snap"    class="snap-panel"><div id="snap-arpu-chart"   class="chart-box"></div></div>
@@ -280,13 +273,13 @@
         <div id="com-plans-pie" class="chart-box"></div>
       </div>
       <div class="table-wrap"><table id="com-plans-table" class="data-table"><thead><tr>
-        <th>Plan</th><th>Type</th><th>Price TND</th><th>Data GB</th><th>5G</th><th>VoLTE</th><th>Subscribers</th>
+        <th>Plan</th><th>Type</th><th>Price ¥</th><th>Data GB</th><th>5G</th><th>VoLTE</th><th>Subscribers</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div id="com-panel-billing" class="com-panel">
       <div id="com-billing-chart" class="chart-box"></div>
       <div class="table-wrap"><table id="com-billing-table" class="data-table"><thead><tr>
-        <th>Month</th><th>Billed TND</th><th>Paid TND</th><th>Unpaid TND</th><th>Unpaid Subs</th>
+        <th>Month</th><th>Billed ¥</th><th>Paid ¥</th><th>Unpaid ¥</th><th>Unpaid Subs</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div id="com-panel-hvc"     class="com-panel">
@@ -317,15 +310,15 @@
 
 </main>
 
-<script src="/static/js/charts.js?v=3"></script>
+<script src="/static/js/charts.js?v=4"></script>
 <script src="/static/js/strategy_diagram.js"></script>
 <script src="/static/js/mindmap.js?v=3"></script>
 <script src="/static/js/ws.js"></script>
-<script src="/static/js/chat.js?v=5"></script>
+<script src="/static/js/chat.js?v=6"></script>
 <script src="/static/js/network.js"></script>
 <script src="/static/js/subscribers.js"></script>
 <script src="/static/js/commercial.js"></script>
 <script src="/static/js/campaigns.js"></script>
-<script src="/static/js/main.js?v=3"></script>
+<script src="/static/js/main.js?v=7"></script>
 </body>
 </html>

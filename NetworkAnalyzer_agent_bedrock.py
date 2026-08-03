@@ -909,7 +909,7 @@ _SC_TABLES = {
     "subscribers", "devices", "subscriber_technology", "sites", "cells",
     "kpis_daily", "coverage", "network_alarms", "mobility_profile",
     "dou_monthly", "qoe_daily", "ott_monthly", "qoe_scores", "mobility_events",
-    "alarms",
+    "alarms", "complaints", "experience_incidents",
 }
 _OP_TABLES = {
     "customers", "plans", "subscriptions", "billing", "offers", "campaigns",
@@ -1020,6 +1020,8 @@ dou_monthly: msisdn, month(YYYY-MM), total_data_gb, distinct_cells_used, primary
 ott_monthly: msisdn, month, streaming_gb, gaming_gb, web_gb, voip_gb, social_gb, sms_count
 mobility_profile: msisdn, month, distinct_cells_count, avg_daily_cells, primary_cell_id, mobility_class('stationary'/'low'/'medium'/'high'), is_fwa_candidate
 qoe_daily: msisdn, date, app_type('gaming'/'video'/'voip'/'web'/'social'), avg_latency_ms, avg_throughput_mbps, experience_score, experience_label('poor'/'fair'/'good'/'excellent')
+experience_incidents: incident_id, msisdn, value_segment, is_hvc, region, affected_service('video streaming'/'mobile data'/'voice calls'/'all services'), root_cause, severity('minor'/'major'/'critical'), started_at(DATETIME 'YYYY-MM-DD HH:MM:SS'), expected_resolution_at, resolved_at(NULL while open), status('active'/'resolved'), duration_min, complaint_id. LIVE per-customer service-issue log. RIGHT-NOW / "at this moment" / "currently" questions => WHERE status='active'. Timeline / "today at what time" => filter/order by started_at (a resolved row keeps its started_at + resolved_at forever). "Streaming issues" => affected_service='video streaming'. is_hvc/value_segment/region are snapshotted on the row, so HVC filters need NO join. Order active issues by severity then started_at.
+complaints: complaint_id, msisdn, date, category, description, status('open'/'in_progress'/'resolved'/'closed'), resolution_days
 
 === OPERATOR DB (query_op) ===
 customers: msisdn(PK), full_name, segment('prepaid'/'postpaid'/'enterprise'), is_active — NO region column, get region from subscribers.region
@@ -1259,7 +1261,8 @@ COMPACT_SCHEMA = COMPACT_SCHEMA + "\n\n" + DATA_PROFILE
 # ── Bedrock-specific schema additions ───────────────────────────────────
 BEDROCK_CRITICAL_RULES = """
 === CRITICAL RULES ===
-- NetworkAnalyzer DB (SC): subscribers, devices, subscriber_technology, sites, cells, kpis_daily, network_alarms, coverage, dou_monthly, mobility_profile, qoe_daily
+- NetworkAnalyzer DB (SC): subscribers, devices, subscriber_technology, sites, cells, kpis_daily, network_alarms, coverage, dou_monthly, mobility_profile, qoe_daily, experience_incidents, complaints
+- experience_incidents is the LIVE service-issue log — "right now / at this moment / currently" => WHERE status='active'; "today at what time / timeline" => use started_at; "streaming" => affected_service='video streaming'. is_hvc/value_segment/region are on the row (no join needed for HVC).
 - Operator DB (OP): customers, subscriptions, plans, billing, customer_value, offers, campaigns, campaign_targets
 - Cross-DB queries: use QUERY_BOTH with ATTACH DATABASE 'operator_new.db' AS op; prefix OP tables with op.
 - subscriptions: always filter is_current=1 for active subscription
@@ -1996,6 +1999,7 @@ Rules:
 - In JSON output, never use commas in numbers. Write 13532 not 13,532.
 - Before writing the "text" field, verify all arithmetic: if your query returns grouped counts, the "remaining" group is total minus the sum of all other groups. Never reuse the total as a subgroup count.
 - RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
+- ONLY CLAIM WHAT YOU QUERIED: every statement in your answer must be supported by a row your executed queries actually returned. This applies HARDEST to negative and causal claims — "there are no active alarms", "this is not caused by X", "it isn't a radio-side problem", "nothing else is affected". You can only rule something OUT if you ran a query that looked for it and got zero rows. If you did not query alarms, say nothing about alarms. If you did not query RSRP/latency/throughput, do not claim the issue is or isn't related to them. When a root_cause column already tells you the cause, REPORT that cause — do not speculate about mechanisms (CDN vs backhaul vs radio) you never measured. If you think an extra check is worth making, run it; otherwise stay silent about it. An answer that states only what the data shows is strictly better than one padded with unverified diagnosis.
 
 OUTPUT FORMAT — When writing CONCLUDE, output valid JSON on a single line. Field order MUST be: text, recommendations, strategy_diagram, mindmap, chart — in that exact order:
 {"text": "your analysis here", "recommendations": ["action 1", "action 2", "action 3"], "strategy_diagram": {"title": "Migration Strategy", "segments": [{"label": "3G Non-VoLTE", "count": 8658, "color": "red", "strategy": "4G Terminal Upgrade"}, {"label": "3G VoLTE-capable", "count": 3765, "color": "amber", "strategy": "VoLTE Migration"}], "strategies": [{"label": "4G Terminal Upgrade", "tier": "4G", "color": "amber", "actions": ["Subsidized device swap", "Bundle package offer"]}, {"label": "VoLTE Migration", "tier": "4G", "color": "purple", "actions": ["SMS activation campaign", "3-month data bonus"]}]}, "mindmap": {"center": "3G Sunset Strategy", "nodes": [{"id": "n1", "label": "3G-Only Devices", "value": "8641 subs", "color": "red", "type": "data", "children": [{"id": "n1a", "label": "No 4G capability", "type": "data", "color": "red"}, {"id": "n1b", "label": "Subsidized device swap", "type": "suggestion", "color": "red"}, {"id": "n1c", "label": "Targeted SMS alerts", "type": "suggestion", "color": "red"}]}, {"id": "n2", "label": "VoLTE-Capable", "value": "3711 subs", "color": "amber", "type": "data", "children": [{"id": "n2a", "label": "Has 4G device", "type": "data", "color": "amber"}, {"id": "n2b", "label": "Activate VoLTE via app", "type": "suggestion", "color": "amber"}]}]}, "chart": {"type": "bar", "title": "Chart Title", "x": ["A","B","C"], "y": [1,2,3], "x_label": "Category", "y_label": "Value"}}
@@ -2165,7 +2169,7 @@ def _fetch_alarm_context() -> str:
                     f"- [ALARM/{r.get('severity','?').upper()}] {r.get('alarm_type','?')} "
                     f"(cell {r.get('cell_id','?')}, {r.get('cell_technology','?')}, {location}): "
                     f"{r.get('affected_subs', 0)} affected subscribers, "
-                    f"avg ARPU {r.get('avg_arpu', 'N/A')} TND, "
+                    f"avg ARPU {r.get('avg_arpu', 'N/A')} Yuan, "
                     f"{r.get('high_risk_count', 0)} high-churn-risk, "
                     f"avg churn score {r.get('avg_churn_score', 'N/A')}"
                 )
@@ -2765,7 +2769,8 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                                           "billing","offers","campaigns","campaign_targets","sms_log","offer_assignments"}
                             _sql_tables = set(re.findall(r'(?:op\.)?(\w+)', sql.lower()))
                             _sc_tables = {"subscribers","devices","subscriber_technology","sites","cells",
-                                          "kpis_daily","coverage","network_alarms","mobility_profile","dou_monthly","qoe_daily"}
+                                          "kpis_daily","coverage","network_alarms","mobility_profile","dou_monthly",
+                                          "qoe_daily","complaints","experience_incidents"}
                             if _sql_tables & _op_tables and not (_sql_tables & _sc_tables):
                                 # Pure operator query — run via QUERY_OP directly
                                 sql = re.sub(r'ATTACH[^;]+;\s*', '', sql, flags=re.IGNORECASE)
@@ -3413,6 +3418,7 @@ def _dispatch_action(action_str: str, context: str = "") -> dict:
 _memory           = []       # compressed summaries for chitchat/intent context
 _conv_messages    = []       # proper Bedrock multi-turn messages [{role, content}]
 _MAX_CONV_TURNS   = 10       # keep last 10 user/assistant exchanges (20 messages)
+_rolling_summary  = ""       # hybrid memory: gist of turns older than the verbatim window
 _pending          = None
 _partial_state    = None  # saved context when chain exits without CONCLUDE
 _streaming_queue  = None
@@ -3481,6 +3487,34 @@ def _memory_context() -> str:
 def _conv_history() -> list:
     """Return last _MAX_CONV_TURNS exchanges as Bedrock messages list."""
     return _conv_messages[-(  _MAX_CONV_TURNS * 2):]
+
+def _evict_to_summary():
+    """Hybrid memory: keep the last _MAX_CONV_TURNS turns verbatim; fold older turns into
+    a rolling summary so long conversations stay bounded without hard-forgetting. Only runs
+    once the window overflows, so short chats pay nothing (like recent-verbatim + compacted-old)."""
+    global _conv_messages, _rolling_summary
+    keep = _MAX_CONV_TURNS * 2
+    if len(_conv_messages) <= keep:
+        return
+    overflow = _conv_messages[:-keep]
+    _conv_messages = _conv_messages[-keep:]
+    lines = []
+    for m in overflow:
+        txt = " ".join(c.get("text", "") for c in m.get("content", []) if c.get("text"))
+        if txt.strip():
+            lines.append(f"{m.get('role', '').upper()}: {txt.strip()}")
+    if not lines:
+        return
+    prior = f"Summary so far:\n{_rolling_summary}\n\n" if _rolling_summary else ""
+    new = _llm_quiet(
+        "Summarize the conversation in 4-6 sentences. Preserve specific numbers, entities "
+        "(regions, msisdns, segments, metrics), decisions made, and what the user is trying to do. "
+        "Merge with any earlier summary. Output only the summary.",
+        f"{prior}Older turns to fold in:\n" + "\n".join(lines) + "\n\nUpdated summary:",
+        max_tokens=260, allow_thinking=False,
+    )
+    if new and not new.startswith("ERROR"):
+        _rolling_summary = new.strip()
 
 # ═══════════════════════════════════════════════════════════════════════
 # CONFIRMATION DETECTION
@@ -3690,6 +3724,7 @@ RULES:
 - Never use commas in numbers: 13532 not 13,532.
 - Verify arithmetic before concluding: if a query returns grouped counts, the "remaining" group is total minus the sum of the other groups. Never reuse the total as a subgroup count.
 - RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
+- ONLY CLAIM WHAT YOU QUERIED: every statement in your answer must be supported by a row your executed queries actually returned. This applies HARDEST to negative and causal claims — "there are no active alarms", "this is not caused by X", "it isn't a radio-side problem", "nothing else is affected". You can only rule something OUT if you ran a query that looked for it and got zero rows. If you did not query alarms, say nothing about alarms. If you did not query RSRP/latency/throughput, do not claim the issue is or isn't related to them. When a root_cause column already tells you the cause, REPORT that cause — do not speculate about mechanisms (CDN vs backhaul vs radio) you never measured. If you think an extra check is worth making, run it; otherwise stay silent about it. An answer that states only what the data shows is strictly better than one padded with unverified diagnosis.
 
 BEFORE calling conclude — if you have run only 1 query so far and the question has a commercial angle, you MUST run 1 enrichment query first. Match it to the context:
 - Top ARPU / platinum subscribers → check what plan they're on (already on the highest tier?) or whether they have 5G-capable devices not yet on 5G
@@ -3895,6 +3930,29 @@ def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
         if inner:
             inp = inner
             text = (inner.get("text") or "").strip()
+    # Defensive: the model sometimes writes legacy labeled sections INSIDE the
+    # text field ("strategy_diagram: {...}", "Recommendations: 1. ...") instead
+    # of using the structured tool fields. Lift them into their fields, then
+    # strip them from the display text so raw JSON never reaches the chat.
+    for _fld in ("strategy_diagram", "mindmap", "chart"):
+        _m = re.search(r'"?' + _fld + r'"?\s*[:=]\s*(?=\{)', text)
+        if _m:
+            _obj = _first_json_obj(text[_m.end():])
+            if _obj:
+                if not inp.get(_fld):
+                    try:
+                        inp[_fld] = json.loads(re.sub(r'\s+', ' ', re.sub(r'(\d),(\d{3})', r'\1\2', _obj)))
+                    except Exception:
+                        pass
+                text = (text[:_m.start()] + text[_m.end() + len(_obj):]).strip()
+    if not inp.get("recommendations"):
+        _m = re.search(r'\bRecommendations?\s*:\s*', text)
+        if _m and re.match(r'\s*1[\.\)]', text[_m.end():]):
+            _items = [i.strip() for i in re.split(r'\s*\d+[\.\)]\s+', text[_m.end():]) if i.strip()]
+            if _items:
+                inp["recommendations"] = _items
+                text = text[:_m.start()].strip()
+    text = re.sub(r'\{.*\}', '', text, flags=re.DOTALL).strip()  # never render raw JSON
     text = re.sub(r'\$\s*([\d,\.]+)', r'\1 Yuan', text)
     text = re.sub(r'([\d,\.]+)\s*TND', r'\1 Yuan', text)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
@@ -3985,6 +4043,12 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
     _prior_turns = _hist[:-1] if (_hist and _hist[-1].get("role") == "user") else _hist
     messages = [dict(m) for m in _prior_turns]
     messages.append({"role": "user", "content": [{"text": f"Question: {question}"}]})
+    # Hybrid memory: prepend the rolling summary of older (aged-out) turns to the earliest
+    # message, so continuity holds over long chats without re-sending everything verbatim.
+    if _rolling_summary and messages:
+        _m0 = messages[0]
+        _t0 = _m0["content"][0].get("text", "") if _m0.get("content") else ""
+        _m0["content"] = [{"text": f"[Summary of earlier conversation: {_rolling_summary}]\n\n{_t0}"}]
 
     last_sql = None
     steps_log = []
@@ -4062,9 +4126,11 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                 sql = re.sub(r'```sql|```', '', inp.get("sql", "")).strip().rstrip(';')
                 db = inp.get("database", "network")
                 if not sql.upper().startswith(("SELECT", "WITH", "ATTACH")):
+                    steps_log.append(f"[rejected: not a SELECT] {sql[:90]}")
                     tool_results.append((tid, "Only SELECT/WITH queries are allowed.")); continue
                 key = re.sub(r'\s+', ' ', sql.upper())
                 if key in seen:
+                    steps_log.append(f"[rejected: duplicate] {sql[:90]}")
                     tool_results.append((tid, "Duplicate query — reuse the earlier result or try a different one.")); continue
                 seen.add(key)
                 if db == "operator":
@@ -4078,9 +4144,11 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                     runner, db_path = query_sc, SC_DB
                 sem = _check_sql_semantics(sql)
                 if sem:
+                    steps_log.append(f"[rejected: semantics] {sql[:90]}")
                     tool_results.append((tid, f"semantic error: {sem}")); continue
                 serr = _check_sql(sql, db_path)
                 if serr:
+                    steps_log.append(f"[rejected: colcheck] {sql[:90]}")
                     tool_results.append((tid, serr)); continue
                 rows = runner(sql)
                 last_sql = sql
@@ -4118,7 +4186,26 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                 for tid, txt in tool_results
             ]})
 
-    # step budget exhausted (or mid-chain failure)
+    # Step budget exhausted (or mid-chain failure). Don't discard the rows we already
+    # have — synthesize from them, same as _run_chain does with its context.
+    if results_blob:
+        print("[Tools v2] step budget exhausted → synthesizing from gathered data")
+        try:
+            summary = _llm(
+                "You are a telecom analyst. Summarize findings and recommend actions. "
+                "Use ONLY the data provided — never invent numbers. If the data only "
+                "partially answers the question, say which part is still missing.",
+                f"Question: {question}\n\nData gathered:\n{results_blob[-6000:]}\n\nAnalysis:"
+            )
+        except Exception as e:
+            print(f"[Tools v2] exhaustion synthesis failed: {e}")
+            summary = None
+        if summary and summary.strip():
+            finished = _finalize_tools({"text": summary.strip()}, question, treemap_ctx,
+                                       is_treemap, last_sql, steps_log, results_blob)
+            finished["truncated"] = True
+            return finished
+
     return {"type": "analysis",
             "text": "I couldn't finish within the step budget — try narrowing the question.",
             "steps": steps_log, "truncated": True}
@@ -4194,7 +4281,15 @@ _CLARIFY_SYS = (
     "You decide whether a telecom-analytics question is too ambiguous to answer well.\n"
     "Available data: subscribers (region, current technology, value segment, device 5G-capability, "
     "churn risk, tenure), network KPIs (throughput, dropped-call rate, latency, availability, "
-    "alarms by region/technology/severity), commercial (ARPU, plans, billing, segments).\n\n"
+    "alarms by region/technology/severity), commercial (ARPU, plans, billing, segments), "
+    "and a LIVE per-customer service-issue log (experience_incidents: who is having an issue "
+    "right now, which service is affected — video streaming / mobile data / voice calls / all "
+    "services — the root cause, severity, and when it started/was resolved).\n"
+    "NEVER ask the user to define a term the data already defines. An 'HVC'/high-value customer "
+    "is the is_hvc flag (gold/platinum value_segment). A 'streaming issue' / 'issue' / 'problem' "
+    "is a row in the live issue log — it is NOT for the user to redefine as throughput, latency "
+    "or dropped calls. Questions about who is having issues right now are ANSWERABLE AS ASKED: "
+    "return {\"clarify\": false}.\n\n"
     'If the question is specific enough to answer directly, output exactly: {"clarify": false}\n'
     "ONLY if a key choice would MEANINGFULLY change the answer, output:\n"
     '{"clarify": true, "question": "<one short question>", "options": ['
@@ -4307,10 +4402,26 @@ def _maybe_clarify_baseline(question: str):
         "options": opts,
     }
 
+# A live-issue question ("who has streaming issues right now?") is NOT ambiguous:
+# experience_incidents already defines what an issue is (affected_service), who is
+# high-value (is_hvc), and what "right now" means (status='active'). Clarifying it
+# invents distinctions the schema doesn't have and adds a round-trip to exactly the
+# questions that are supposed to feel real-time. Principle: when the data model
+# already defines the terms, don't ask — just answer.
+_LIVE_NOW_RE   = re.compile(r"(right now|at this moment|currently|live|active|ongoing|happening now|today)", re.I)
+_ISSUE_WORD_RE = re.compile(r"(issue|problem|incident|outage|degrad|struggl|complain|buffering|affected|impacted)", re.I)
+
+def _is_live_incident_q(question: str) -> bool:
+    """True for 'who is having issues right now' style questions the live incident log answers as-asked."""
+    return bool(_LIVE_NOW_RE.search(question) and _ISSUE_WORD_RE.search(question))
+
 def _maybe_clarify(question: str):
     """Unified curiosity: baseline/threshold ask first (so 'high ARPU' style questions
     get a number input), then the deterministic subscriber-drill catalog (instant),
-    then the general LLM clarify gate for other vague questions."""
+    then the general LLM clarify gate for other vague questions. Live-issue questions
+    skip the whole gate — the incident log already defines every term in them."""
+    if _is_live_incident_q(question):
+        return None
     return _maybe_clarify_baseline(question) or _maybe_clarify_dimensions(question) or _llm_clarify_gate(question)
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -4408,8 +4519,7 @@ def run_agent(user_input: str) -> dict:
         _ans = result.get("text", "")
         if _ans:
             _conv_messages.append({"role": "assistant", "content": [{"text": _ans}]})
-            if len(_conv_messages) > _MAX_CONV_TURNS * 2:
-                _conv_messages[:] = _conv_messages[-(_MAX_CONV_TURNS * 2):]
+            _evict_to_summary()
         return result
 
     # Structured tool-calling path (preferred). Falls back to the text-tag
@@ -4439,9 +4549,7 @@ def run_agent(user_input: str) -> dict:
     _answer_text = result.get("text", "")
     if _answer_text:
         _conv_messages.append({"role": "assistant", "content": [{"text": _answer_text}]})
-        # trim to window
-        if len(_conv_messages) > _MAX_CONV_TURNS * 2:
-            _conv_messages[:] = _conv_messages[-(_MAX_CONV_TURNS * 2):]
+        _evict_to_summary()   # hybrid: verbatim window + rolling summary of older turns
     return result
 
 
@@ -4507,9 +4615,10 @@ def get_proactive_alerts() -> list:
 
 
 def reset_memory():
-    global _memory, _conv_messages, _pending, _partial_state, _sem_cache, _recent_clarify
+    global _memory, _conv_messages, _rolling_summary, _pending, _partial_state, _sem_cache, _recent_clarify
     _memory        = []
     _conv_messages = []
+    _rolling_summary = ""
     _pending       = None
     _partial_state = None
     _sem_cache     = []

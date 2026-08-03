@@ -297,8 +297,126 @@ async function loadCampaigns() {
   }).join('');
 }
 
+// ── Query Builder (no-SQL, dropdown-driven) ─────────────────────────────────
+let _qbSchema = null, _qbBuilt = false;
+
+async function loadQuery() {
+  if (_qbBuilt) return;
+  _qbSchema = await get('/api/qb/schema');
+  if (!_qbSchema) return;
+  const dbSel = document.getElementById('qb-db');
+  dbSel.innerHTML = Object.keys(_qbSchema).map(d => `<option value="${d}">${d}</option>`).join('');
+  dbSel.onchange = qbPopulateTables;
+  document.getElementById('qb-table').onchange = qbPopulateColumns;
+  document.getElementById('qb-add-filter').onclick = qbAddFilter;
+  document.getElementById('qb-run').onclick = qbRun;
+  document.getElementById('qb-agg-func').onchange = qbRefreshOrder;
+  document.getElementById('qb-agg-col').onchange = qbRefreshOrder;
+  qbPopulateTables();
+  _qbBuilt = true;
+}
+
+const qbTables = () => (_qbSchema[document.getElementById('qb-db').value] || {});
+const qbCols   = () => (qbTables()[document.getElementById('qb-table').value] || []);
+
+function qbPopulateTables() {
+  document.getElementById('qb-table').innerHTML = Object.keys(qbTables()).map(n => `<option>${n}</option>`).join('');
+  qbPopulateColumns();
+}
+
+function qbChip(container, col) {
+  const el = document.createElement('span');
+  el.className = 'qb-chip'; el.textContent = col; el.dataset.col = col;
+  el.onclick = () => el.classList.toggle('on');
+  container.appendChild(el);
+}
+
+function qbPopulateColumns() {
+  const cols = qbCols();
+  const colsBox = document.getElementById('qb-cols'); colsBox.innerHTML = '';
+  const grpBox  = document.getElementById('qb-group'); grpBox.innerHTML = '';
+  cols.forEach(c => { qbChip(colsBox, c); qbChip(grpBox, c); });
+  document.getElementById('qb-agg-col').innerHTML =
+    '<option value="*">* (all rows)</option>' + cols.map(c => `<option>${c}</option>`).join('');
+  document.getElementById('qb-filters').innerHTML = '';
+  qbRefreshOrder();
+}
+
+function qbAggAlias() {
+  const f = document.getElementById('qb-agg-func').value;
+  if (!f) return null;
+  const c = document.getElementById('qb-agg-col').value;
+  return f.toLowerCase() + '_' + (c === '*' ? 'all' : c);
+}
+
+function qbRefreshOrder() {
+  const cols = qbCols(), alias = qbAggAlias(), sel = document.getElementById('qb-order-col'), cur = sel.value;
+  const opts = ['<option value="">(none)</option>'].concat(cols.map(c => `<option>${c}</option>`));
+  if (alias) opts.push(`<option value="${alias}">${alias} (aggregate)</option>`);
+  sel.innerHTML = opts.join(''); sel.value = cur;
+}
+
+const qbChosen = id => [...document.getElementById(id).querySelectorAll('.qb-chip.on')].map(e => e.dataset.col);
+
+async function qbAddFilter() {
+  const row = document.createElement('div'); row.className = 'qb-filter-row';
+  const colSel = document.createElement('select');
+  colSel.innerHTML = qbCols().map(c => `<option>${c}</option>`).join('');
+  const opSel = document.createElement('select');
+  opSel.innerHTML = ['=', '!=', '>', '<', '>=', '<=', 'LIKE'].map(o => `<option>${o}</option>`).join('');
+  const valWrap = document.createElement('span'); valWrap.className = 'qb-val';
+  const x = document.createElement('span'); x.className = 'qb-x'; x.textContent = '✕'; x.onclick = () => row.remove();
+  row.append(colSel, opSel, valWrap, x);
+  document.getElementById('qb-filters').appendChild(row);
+  const fillVal = async () => {
+    const d = await get(`/api/qb/distinct?database=${document.getElementById('qb-db').value}&table=${document.getElementById('qb-table').value}&column=${encodeURIComponent(colSel.value)}`);
+    valWrap.innerHTML = '';
+    if (d && d.values && d.values.length) {
+      const s = document.createElement('select');
+      s.innerHTML = d.values.map(v => `<option>${v}</option>`).join('');
+      valWrap.appendChild(s);
+    } else {
+      const i = document.createElement('input'); i.placeholder = 'value'; valWrap.appendChild(i);
+    }
+  };
+  colSel.onchange = fillVal;
+  await fillVal();
+}
+
+async function qbRun() {
+  const filters = [...document.querySelectorAll('#qb-filters .qb-filter-row')].map(r => {
+    const sels = r.querySelectorAll('select');
+    const valEl = r.querySelector('.qb-val select, .qb-val input');
+    return { column: sels[0].value, op: sels[1].value, value: valEl ? valEl.value : '' };
+  });
+  const func = document.getElementById('qb-agg-func').value;
+  const body = {
+    database: document.getElementById('qb-db').value,
+    table:    document.getElementById('qb-table').value,
+    columns:  qbChosen('qb-cols'),
+    group_by: qbChosen('qb-group'),
+    aggregate: func ? { func, column: document.getElementById('qb-agg-col').value } : null,
+    filters,
+    order_by: { column: document.getElementById('qb-order-col').value, dir: document.getElementById('qb-order-dir').value },
+    limit: parseInt(document.getElementById('qb-limit').value) || 100,
+  };
+  const res = await fetch(API + '/api/qb/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => r.json()).catch(() => ({ error: 'request failed' }));
+
+  document.getElementById('qb-sql').textContent = res.sql || '—';
+  const tbl = document.getElementById('qb-results'), cnt = document.getElementById('qb-count');
+  if (res.error) { tbl.innerHTML = `<tr><td class="empty">${res.error}</td></tr>`; cnt.textContent = ''; return; }
+  const rows = res.rows || [];
+  cnt.textContent = `(${rows.length} rows)`;
+  if (!rows.length) { tbl.innerHTML = '<tr><td class="empty">No rows.</td></tr>'; return; }
+  const cols = Object.keys(rows[0]);
+  tbl.innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>' +
+    rows.map(r => '<tr>' + cols.map(c => `<td>${r[c] == null ? '—' : r[c]}</td>`).join('') + '</tr>').join('');
+}
+
 // ── Section nav ─────────────────────────────────────────────────────────────
-const LOADERS = { network: loadNetwork, subscribers: loadSubscribers, commercial: loadCommercial, campaigns: loadCampaigns };
+const LOADERS = { network: loadNetwork, subscribers: loadSubscribers, commercial: loadCommercial, campaigns: loadCampaigns, query: loadQuery };
 let current = 'network';
 
 function showSection(sec) {

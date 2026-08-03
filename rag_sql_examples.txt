@@ -537,3 +537,30 @@ db: BOTH
 sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.msisdn, op.customers.full_name, s.region, cv.value_segment, cv.arpu, cv.churn_risk_score, COUNT(DISTINCT q.date) AS poor_qoe_days FROM op.customer_value cv JOIN subscribers s ON cv.msisdn=s.msisdn JOIN op.customers ON cv.msisdn=op.customers.msisdn JOIN qoe_daily q ON cv.msisdn=q.msisdn AND q.experience_label='poor' AND q.date>=date((SELECT MAX(date) FROM qoe_daily),'-7 days') WHERE cv.month=(SELECT MAX(month) FROM op.customer_value) AND cv.value_segment IN ('gold','platinum') GROUP BY cv.msisdn ORDER BY cv.churn_risk_score DESC, poor_qoe_days DESC LIMIT 20
 note: The proactive retention/upsell list: gold/platinum customers who had poor experience days in the last week, ranked by churn risk. These are the ones whose churn is being driven by network experience (not just usage), so a retention offer + network fix (or a 5G/VoLTE upsell to a better layer) is the play. Join qoe_daily (network DB) to customer_value/customers (operator DB).
 ==END==
+
+==DOC==
+title: HVCs with a service issue RIGHT NOW (active incidents)
+tags: right now at this moment currently live active ongoing hvc high value gold platinum streaming issue problem trouble experience incident who is affected happening now real time
+question: At this moment do we have any HVCs having issues with their streaming? Which high-value customers are affected right now?
+db: SC
+sql: SELECT msisdn, region, value_segment, affected_service, root_cause, severity, started_at FROM experience_incidents WHERE status='active' AND is_hvc=1 AND affected_service='video streaming' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'major' THEN 1 ELSE 2 END, started_at ASC
+note: experience_incidents is the LIVE issue log. "at this moment / right now / currently" => WHERE status='active' (never a date filter — active means ongoing). "streaming" => affected_service='video streaming'; drop that clause for ALL issue types. is_hvc/value_segment/region are ON the row, so no join is needed to filter HVCs. started_at is a full 'YYYY-MM-DD HH:MM:SS' timestamp. To count instead of list: SELECT COUNT(*) ... WHERE status='active' AND is_hvc=1. For all-service issues use affected_service without the streaming filter.
+==END==
+
+==DOC==
+title: Today's experience incident timeline with times (per customer or all HVCs)
+tags: today timeline what time o'clock when did this happen history earlier incidents resolved fixed at hh:mm started resolved streaming outage log chronological
+question: Today at what time did this HVC have an issue? Show today's incidents and when they happened / got fixed.
+db: SC
+sql: SELECT msisdn, region, value_segment, affected_service, root_cause, severity, started_at, resolved_at, status FROM experience_incidents WHERE date(started_at)=date('now') AND is_hvc=1 ORDER BY started_at DESC
+note: The historical timeline. A resolved incident KEEPS its started_at and resolved_at forever, so this answers "today at 14:32 this HVC had a streaming issue (resolved 14:49)". Filter one customer with AND msisdn='...'. Use date(started_at)=date('now') for today; started_at BETWEEN ... for a window. status shows whether it's still live ('active') or already healed ('resolved'). ORDER BY started_at so the timeline reads chronologically.
+==END==
+
+==DOC==
+title: Active incidents summary by service and severity (network health right now)
+tags: how many active incidents live issues right now breakdown by service severity streaming data voice outage current network experience health situation summary
+question: What service issues are live right now across the base? How many active incidents by type?
+db: SC
+sql: SELECT affected_service, severity, COUNT(*) AS active_incidents, SUM(is_hvc) AS hvc_affected FROM experience_incidents WHERE status='active' GROUP BY affected_service, severity ORDER BY active_incidents DESC
+note: A right-now situation snapshot of the live issue log. status='active' = currently ongoing. hvc_affected (SUM(is_hvc)) shows how many of each are hitting high-value customers. Drop the GROUP BY for a single total. These self-heal on their own over minutes (the simulator resolves them), so counts shift between asks — that's expected, it's real-time.
+==END==

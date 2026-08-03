@@ -21,6 +21,7 @@
     <a class="nav-item" data-sec="subscribers"><span class="nav-icon">👥</span> Subscribers</a>
     <a class="nav-item" data-sec="commercial"><span class="nav-icon">💰</span> Commercial</a>
     <a class="nav-item" data-sec="campaigns"><span class="nav-icon">🎯</span> Campaigns</a>
+    <a class="nav-item" data-sec="query"><span class="nav-icon">🧩</span> Query Builder</a>
   </nav>
   <div class="sidebar-footer">
     <a href="http://localhost:8000" target="_blank" class="chat-link">↗ Copilot Chat</a><br>
@@ -133,6 +134,55 @@
     <div class="panel">
       <span class="section-label">Offers catalogue</span>
       <div class="grid-2" id="camp-offers"></div>
+    </div>
+  </section>
+
+  <!-- QUERY BUILDER -->
+  <section class="section" id="sec-query">
+    <div class="panel">
+      <div class="qb-row">
+        <label>Database <select id="qb-db"></select></label>
+        <label>Table <select id="qb-table"></select></label>
+        <label>Limit <input id="qb-limit" type="number" value="100" min="1" max="1000" style="width:80px"></label>
+      </div>
+
+      <div class="section-label" style="margin-top:14px">Columns to show</div>
+      <div id="qb-cols" class="qb-chips"></div>
+
+      <div class="qb-row" style="margin-top:12px">
+        <label>Aggregate
+          <select id="qb-agg-func">
+            <option value="">(none)</option>
+            <option>COUNT</option><option>AVG</option><option>SUM</option><option>MIN</option><option>MAX</option>
+          </select>
+        </label>
+        <label>of <select id="qb-agg-col"></select></label>
+      </div>
+
+      <div class="section-label" style="margin-top:12px">Group by</div>
+      <div id="qb-group" class="qb-chips"></div>
+
+      <div class="qb-head">
+        <span class="section-label">Filters</span>
+        <button class="qb-btn" id="qb-add-filter">+ Add filter</button>
+      </div>
+      <div id="qb-filters"></div>
+
+      <div class="qb-row" style="margin-top:14px">
+        <label>Order by <select id="qb-order-col"><option value="">(none)</option></select></label>
+        <select id="qb-order-dir"><option>ASC</option><option selected>DESC</option></select>
+        <button class="qb-btn qb-run" id="qb-run">▸ Run query</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="section-label">Generated SQL</div>
+      <pre id="qb-sql" class="qb-sql">—</pre>
+    </div>
+
+    <div class="panel">
+      <div class="section-label">Results <span id="qb-count" class="qb-count"></span></div>
+      <div class="table-wrap"><table id="qb-results"></table></div>
     </div>
   </section>
 </main>

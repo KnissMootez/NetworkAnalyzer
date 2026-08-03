@@ -88,6 +88,14 @@
       "always_filter": ["q.date=(SELECT MAX(date) FROM qoe_daily)"],
       "notes": "app_type: gaming/video/voip/web/social. experience_label: poor/fair/good/excellent."
     },
+    "experience_incidents": {
+      "db": "sc",
+      "pk": ["incident_id"],
+      "tags": ["incident", "issue", "problem", "service issue", "streaming issue", "outage", "right now", "at this moment", "currently", "live", "active", "ongoing", "real time", "today at", "timeline", "when did", "what time", "self heal", "resolved"],
+      "key_columns": ["incident_id", "msisdn", "value_segment", "is_hvc", "region", "affected_service", "root_cause", "severity", "started_at", "expected_resolution_at", "resolved_at", "status", "duration_min"],
+      "always_filter": [],
+      "notes": "LIVE per-customer service-issue log with a lifecycle. 'right now / at this moment / currently / live' => WHERE status='active' (NOT a date filter). 'today at what time / timeline / when' => use started_at ('YYYY-MM-DD HH:MM:SS'); a resolved row keeps started_at + resolved_at forever. 'streaming' => affected_service='video streaming' (others: 'mobile data','voice calls','all services'). is_hvc / value_segment / region are snapshotted ON the row — NO join needed to filter HVCs. Order active issues by severity (critical>major>minor) then started_at. Incidents self-heal over minutes so active counts shift between asks."
+    },
     "customers": {
       "db": "op",
       "pk": "msisdn",
@@ -198,6 +206,12 @@
       "on": "s.msisdn=q.msisdn",
       "join": "JOIN qoe_daily q ON s.msisdn=q.msisdn AND q.date=(SELECT MAX(date) FROM qoe_daily)",
       "purpose": "Get subscriber quality of experience"
+    },
+    {
+      "from": "subscribers", "to": "experience_incidents",
+      "on": "s.msisdn=ei.msisdn",
+      "join": "JOIN experience_incidents ei ON s.msisdn=ei.msisdn AND ei.status='active'",
+      "purpose": "Get a subscriber's live/active service issues. Often NO join is needed — experience_incidents already carries region/value_segment/is_hvc, so query it directly for 'HVCs with an active streaming issue right now'."
     },
     {
       "from": "customers", "to": "subscriptions",

@@ -116,6 +116,12 @@ const Chat = (() => {
     const wrap = streamEl.closest(".msg-agent");
     if (wrap) wrap.classList.remove("stream-cursor");
 
+    // Flash the offending cell sites on the coverage map for "issues" questions.
+    // A non-issue answer sends an empty list, which just clears any stale flash.
+    if (typeof App !== "undefined" && App.flashCoverage) {
+      try { App.flashCoverage(result.map_flash || []); } catch (e) {}
+    }
+
     // Replace streamed text with clean result text (handles markdown bolding etc.)
     if (result.text) streamEl.textContent = result.text;
 

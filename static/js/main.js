@@ -190,8 +190,9 @@ const App = (() => {
     const t = document.createElement("div");
     t.textContent = msg;
     t.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);" +
-      "background:#1e2f52;color:#dce4f5;font-family:'Share Tech Mono',monospace;" +
-      "font-size:.75rem;padding:6px 18px;border-radius:4px;z-index:9999;pointer-events:none;";
+      "background:var(--surface);color:var(--text);border:1px solid var(--border);" +
+      "font-family:'Inter',sans-serif;" +
+      "font-size:.75rem;padding:6px 18px;border-radius:6px;z-index:9999;pointer-events:none;";
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 2000);
   }
@@ -212,8 +213,6 @@ const App = (() => {
       if (!rows || !rows.length) return;
       const IMG_W = 4096, IMG_H = 3072;
 
-      // Nation-aware cell site colors
-      const nation = document.body.className.match(/theme-(\w+)/)?.[1];
       // High contrast colors that pop on any map background
       const TECH_COLORS = { "5G":"#ffffff", "4G":"#facc15", "3G":"#f97316", "2G":"#94a3b8" };
       const techColor = TECH_COLORS;
@@ -272,7 +271,7 @@ const App = (() => {
           bgcolor: "rgba(0,0,0,0.6)",
           bordercolor: "rgba(255,255,255,0.25)",
           borderwidth: 1,
-          font: { color: "#fff", size: 11, family: "Share Tech Mono, monospace" },
+          font: { color: "#fff", size: 11, family: "Inter, sans-serif" },
           x: 1, xanchor: "right", y: 0.98,
         },
         dragmode: "pan",
@@ -298,6 +297,23 @@ const App = (() => {
       mapEl.on("plotly_click", function(data) {
         const pt = data.points[0];
         if (!pt) return;
+
+        // A flashing issue ring → ask the agent to explain it and how to fix it
+        if (_isRing(pt.data)) {
+          const cd = pt.customdata || [];
+          const site = cd[0], region = cd[1];
+          if (site) {
+            _toast(`Diagnosing ${site}...`);
+            App.quickQuery(
+              `Cell site ${site} in ${region || "unknown region"} has active service issues right now. ` +
+              `Explain exactly what is going on: the affected services, root cause, severity, when it started, ` +
+              `which subscribers are affected and how many are high-value — then tell me what to do to fix it ` +
+              `and protect those customers.`
+            );
+          }
+          return;
+        }
+
         const id = pt.id || "";
         const [site, region] = id.split("|");
         const tech = pt.data.name;
@@ -310,6 +326,13 @@ const App = (() => {
       // Hover cursor
       mapEl.on("plotly_hover",   () => { mapEl.style.cursor = "pointer"; });
       mapEl.on("plotly_unhover", () => { mapEl.style.cursor = "default"; });
+
+      // A re-plot (e.g. theme switch) wipes the rings — restore Issues-only if it was on
+      if (_issuesOnly) {
+        _applySiteLayerVisibility();
+        fetch("/api/incidents/active-sites?t=" + Date.now())
+          .then(r => r.json()).then(s => _renderIssueRings(s)).catch(() => {});
+      }
 
     }).catch(() => {});
   }
@@ -357,7 +380,7 @@ const App = (() => {
       });
     }).finally(() => {
       btn.disabled = false;
-      btn.textContent = "⚡ SCAN NETWORK";
+      btn.textContent = "Scan network";
     });
   }
 
@@ -366,27 +389,33 @@ const App = (() => {
     dot.className = "status-dot " + (connected ? "connected" : "disconnected");
   }
 
-  function setNation(nation) {
-    ['fire','earth','water','air'].forEach(t => document.body.classList.remove('theme-'+t));
-    if (nation) {
-      document.body.classList.add('theme-'+nation);
-      localStorage.setItem('na-nation', nation);
-    }
-    document.querySelectorAll('.nation-btn').forEach(b => {
-      b.classList.toggle('active', b.dataset.nation === nation);
+  let _theme = null;
+  function setTheme(mode) {
+    const changed = _theme !== null && _theme !== mode;
+    _theme = mode;
+    document.body.classList.toggle('light', mode === 'light');
+    localStorage.setItem('na-theme', mode);
+    document.querySelectorAll('.theme-opt').forEach(b => {
+      b.classList.toggle('active', b.dataset.theme === mode);
     });
-    // Reload charts so colors update
-    setTimeout(() => {
+    const tgl = document.getElementById('theme-toggle');
+    if (tgl) tgl.textContent = mode === 'light' ? '☀' : '🌙';
+    // Re-render charts so Plotly picks up the new palette
+    if (changed) setTimeout(() => {
       if (document.getElementById('coverage-map')?.children.length) _loadCoverage();
       document.querySelectorAll('.chart-box[id]').forEach(el => {
         if (el.id && el.children.length) Plotly.purge(el.id);
       });
       _loadSnapCharts();
-    }, 450);
+    }, 260);
   }
 
-  const _savedNation = localStorage.getItem('na-nation');
-  if (_savedNation) setTimeout(() => setNation(_savedNation), 50);
+  function toggleTheme() {
+    setTheme(_theme === 'light' ? 'dark' : 'light');
+  }
+
+  // apply saved theme immediately, before the first chart renders
+  setTheme(localStorage.getItem('na-theme') || 'dark');
 
   function openSettings() {
     document.getElementById('settings-panel').classList.add('open');
@@ -397,7 +426,145 @@ const App = (() => {
     document.getElementById('settings-overlay').classList.remove('open');
   }
 
-  return { init, send, stop, continueResponse, quickQuery, sendSilent, confirm, cancel, snapTab, toggleSnapshot, applyModel, forgetMemory, scanAlerts, setNation, openSettings, closeSettings };
+  // ── Live-issue rings on the coverage map ────────────────────────────────────
+  // Two ways in: the agent answering an "issues" question (flashCoverage, scoped to
+  // that answer), or the "Issues only" toggle (every live issue). Both render the
+  // same rings — one trace per severity, so the legend reads Critical/Major/Minor
+  // and each pulses at its own rate: the worse it is, the faster it blinks.
+  const SEV_META = {
+    3: { name: "⚠ Critical", color: "#ef4444", period: 4  },   // fastest
+    2: { name: "⚠ Major",    color: "#f97316", period: 7  },
+    1: { name: "⚠ Minor",    color: "#facc15", period: 11 },   // slowest
+  };
+  let _flashTimer = null, _ringIdx = [], _ringMeta = [], _issuesOnly = false;
+
+  const _isRing = t => !!(t && t.name && t.name.indexOf("⚠") === 0);
+
+  function _clearFlash() {
+    if (_flashTimer) { clearInterval(_flashTimer); _flashTimer = null; }
+    _ringIdx = []; _ringMeta = [];
+    const mapEl = document.getElementById("coverage-map");
+    if (!mapEl || !mapEl.data) return;
+    const idx = [];
+    mapEl.data.forEach((t, i) => { if (_isRing(t)) idx.push(i); });
+    if (idx.length) { try { Plotly.deleteTraces(mapEl, idx); } catch (e) {} }
+  }
+
+  function _issueHover(s) {
+    const sev   = s.sev_rank === 3 ? "critical" : s.sev_rank === 2 ? "major" : "minor";
+    const since = (s.since || "").slice(11, 16);
+    return `<b>⚠ ${s.site_name}</b> — ${s.region}<br>` +
+           `<b>${(s.services || "service issue").replace(/,/g, ", ")}</b><br>` +
+           `Cause: ${(s.causes || "unknown").replace(/,/g, ", ")}<br>` +
+           `${sev} · ${s.incidents} active` + (s.hvc ? ` · ${s.hvc} HVC` : "") +
+           (since ? `<br>Since ${since}` : "") +
+           `<br><i>Click to diagnose</i>`;
+  }
+
+  function _updateIssueCount(n) {
+    const el = document.getElementById("issues-count");
+    if (el) el.textContent = n ? String(n) : "";
+  }
+
+  // Healthy sites go 'legendonly' in Issues-only mode — still one click away in the legend.
+  function _applySiteLayerVisibility() {
+    const mapEl = document.getElementById("coverage-map");
+    if (!mapEl || !mapEl.data) return;
+    const idx = [];
+    mapEl.data.forEach((t, i) => { if (!_isRing(t)) idx.push(i); });
+    if (idx.length) {
+      try { Plotly.restyle(mapEl, { visible: _issuesOnly ? "legendonly" : true }, idx); } catch (e) {}
+    }
+  }
+
+  function _renderIssueRings(sites) {
+    const mapEl = document.getElementById("coverage-map");
+    if (!mapEl || !mapEl.data) return 0;    // map not drawn yet
+    _clearFlash();
+    _updateIssueCount(sites ? sites.length : 0);
+    if (!sites || !sites.length) return 0;  // empty list just clears stale rings
+
+    const IMG_H = 3072;
+    const groups = { 3: [], 2: [], 1: [] };
+    sites.forEach(s => {
+      if (s.latitude == null || s.longitude == null) return;
+      (groups[s.sev_rank] || groups[1]).push(s);
+    });
+
+    const traces = [], metas = [];
+    [3, 2, 1].forEach(rank => {
+      const g = groups[rank];
+      if (!g.length) return;
+      const meta = SEV_META[rank];
+      traces.push({
+        type: "scatter", mode: "markers", name: meta.name,
+        x: g.map(s => s.longitude),
+        y: g.map(s => IMG_H - s.latitude),
+        text: g.map(_issueHover),
+        customdata: g.map(s => [s.site_name, s.region]),
+        hoverinfo: "text",
+        marker: { size: 16, color: meta.color, symbol: "circle-open",
+                  line: { width: 2.5, color: meta.color } },
+        hoverlabel: { bgcolor: "rgba(0,0,0,0.88)", bordercolor: meta.color,
+                      font: { color: "#fff", size: 11 } },
+      });
+      metas.push(meta);
+    });
+    if (!traces.length) return 0;
+
+    const base = mapEl.data.length;
+    Plotly.addTraces(mapEl, traces);
+    _ringIdx  = traces.map((_, i) => base + i);
+    _ringMeta = metas;
+
+    // one timer drives every severity — size follows a sine, period set by severity
+    let tick = 0;
+    _flashTimer = setInterval(() => {
+      tick++;
+      const sizes = _ringMeta.map(m => 16 + 6 * (1 + Math.sin((tick / m.period) * Math.PI)));
+      try { Plotly.restyle(mapEl, { "marker.size": sizes }, _ringIdx); }
+      catch (e) { clearInterval(_flashTimer); _flashTimer = null; }
+    }, 90);
+
+    return sites.length;
+  }
+
+  function _revealMap() {
+    const col = document.getElementById("snapshot-col");
+    if (col && col.classList.contains("collapsed")) toggleSnapshot();
+    const covTab = Array.from(document.querySelectorAll(".snap-tab"))
+      .find(b => (b.getAttribute("onclick") || "").includes("'map'"));
+    if (covTab) snapTab(covTab, "map");
+    const mapEl = document.getElementById("coverage-map");
+    if (mapEl) { try { Plotly.Plots.resize(mapEl); } catch (e) {} }
+  }
+
+  // Agent-driven: flash exactly the sites the answer was about.
+  function flashCoverage(sites) {
+    const n = _renderIssueRings(sites);
+    if (!n) return;
+    _revealMap();
+    _toast(`⚠ ${n} site${n > 1 ? "s" : ""} with live issues on the map`);
+  }
+
+  // User-driven: strip the map down to only the sites that are hurting.
+  function toggleIssuesOnly() {
+    _issuesOnly = !_issuesOnly;
+    const btn = document.getElementById("issues-toggle");
+    if (btn) btn.classList.toggle("on", _issuesOnly);
+    _applySiteLayerVisibility();
+    if (!_issuesOnly) return;               // leaving the mode keeps whatever rings are up
+    _revealMap();
+    fetch("/api/incidents/active-sites?t=" + Date.now())
+      .then(r => r.json())
+      .then(sites => {
+        const n = _renderIssueRings(sites);
+        _toast(n ? `${n} site${n > 1 ? "s" : ""} with live issues` : "No live issues right now");
+      })
+      .catch(() => {});
+  }
+
+  return { init, send, stop, continueResponse, quickQuery, sendSilent, confirm, cancel, snapTab, toggleSnapshot, applyModel, forgetMemory, scanAlerts, setTheme, toggleTheme, openSettings, closeSettings, flashCoverage, toggleIssuesOnly };
 })();
 
 document.addEventListener("DOMContentLoaded", App.init);

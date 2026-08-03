@@ -44,7 +44,7 @@ const Subs = (() => {
     ].map(([l,v,s]) => `<div class="kpi-card">
       <div class="kpi-val">${(v||0).toLocaleString()}</div>
       <div class="kpi-lbl">${l}</div>
-      <div style="font-size:.6rem;color:#4f6a8a;font-family:'Share Tech Mono',monospace">${s}</div>
+      <div style="font-size:.6rem;color:var(--muted);font-family:'Inter',sans-serif">${s}</div>
     </div>`).join("");
   }
 

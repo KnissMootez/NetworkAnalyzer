@@ -1,26 +1,13 @@
 /* ═══════════════════════════════════════════════════════════
-   charts.js — Plotly wrapper matching the dark telecom theme
+   charts.js — Plotly wrapper; reads theme colors from CSS vars
    ═══════════════════════════════════════════════════════════ */
 
 const Charts = (() => {
-  // Nation-aware color palettes
-  const NATION_COLORS = {
-    fire:  ["#f97316","#ea580c","#fbbf24","#ef4444","#fb923c","#fde68a","#c2410c","#fed7aa"],
-    earth: ["#84cc16","#65a30d","#d4a017","#4d7c0f","#a3e635","#fde68a","#3a5c09","#bef264"],
-    water: ["#38bdf8","#0ea5e9","#7dd3fc","#0284c7","#a5f3fc","#6ee7b7","#0369a1","#e0f7ff"],
-    air:   ["#fbbf24","#f59e0b","#fcd34d","#d97706","#fdba74","#fde68a","#b45309","#fed7aa"],
-  };
-  const DEFAULT_COLORS = ["#818cf8","#60a5fa","#a78bfa","#34d399","#fb923c","#94a3b8","#f472b6","#facc15"];
-
-  function _getNation() {
-    const cls = document.body.className;
-    const m = cls.match(/theme-(\w+)/);
-    return m ? m[1] : null;
-  }
+  const DARK_COLORS  = ["#818cf8","#60a5fa","#a78bfa","#34d399","#fb923c","#94a3b8","#f472b6","#facc15"];
+  const LIGHT_COLORS = ["#4f46e5","#2563eb","#7c3aed","#059669","#ea580c","#64748b","#db2777","#ca8a04"];
 
   function _colors() {
-    const n = _getNation();
-    return (n && NATION_COLORS[n]) || DEFAULT_COLORS;
+    return document.body.classList.contains("light") ? LIGHT_COLORS : DARK_COLORS;
   }
 
   function _bg() {
@@ -43,7 +30,7 @@ const Charts = (() => {
     return Object.assign({
       paper_bgcolor: bg,
       plot_bgcolor:  bg,
-      font: { color: text, family: "Share Tech Mono, monospace", size: 10 },
+      font: { color: text, family: "Inter, sans-serif", size: 10 },
       margin: { l: 40, r: 16, t: 32, b: 40 },
       colorway: COLORS,
       showlegend: false,
@@ -171,7 +158,7 @@ const Charts = (() => {
     };
     const branch = {}; let ci = 0;
     return labels.map((l, i) => {
-      if (parents[i] === "") return "#0e1a30";          // root tile
+      if (parents[i] === "") return "#3f3f46";          // root tile (neutral)
       const t = topOf(l);
       if (!(t in branch)) branch[t] = COLORS[ci++ % COLORS.length];
       const fade = ["", "e6", "bf", "99"][Math.min(depthOf(l) - 1, 3)] || "99";
@@ -246,19 +233,19 @@ const Charts = (() => {
       branchvalues: "total",
       textinfo: "label+value+percent parent",
       textposition: "middle center",
-      textfont: { size: 12, family: "Share Tech Mono, monospace", color: "#f1f6ff" },
+      textfont: { size: 12, family: "Inter, sans-serif", color: "#f1f6ff" },
       insidetextfont: { size: 12, color: "#f1f6ff" },
       outsidetextfont: { size: 11, color: _textColor() },
       pathbar: { visible: true, thickness: 26, side: "top",
-                 textfont: { size: 12, color: "#cfe0ff", family: "Share Tech Mono, monospace" } },
+                 textfont: { size: 12, color: _textColor(), family: "Inter, sans-serif" } },
       tiling: { pad: 3, packing: "squarify" },
       marker: {
         colors: _treemapColors(labels, parents, rootLabel),
         cornerradius: 6,
         line: { width: 2, color: _bg() },
       },
-      hoverlabel: { bgcolor: "#0a111e", bordercolor: _border(),
-                    font: { family: "Share Tech Mono, monospace", size: 12, color: "#e2eaf8" } },
+      hoverlabel: { bgcolor: "#18181b", bordercolor: _border(),
+                    font: { family: "Inter, sans-serif", size: 12, color: "#e7e7ea" } },
       hovertemplate: "<b>%{label}</b><br>%{value}<br>%{percentParent:.1%} of parent · %{percentRoot:.1%} of total<extra></extra>",
     }], _layout({
       title: { text: spec.title || "", font: { size: 11 } },
@@ -279,7 +266,7 @@ const Charts = (() => {
       x: vals, y: cats,
       marker: { color: colors, line: { width: 0 } },
       text: vals.map(v => typeof v === "number" ? v.toLocaleString() : v),
-      textposition: "auto", textfont: { size: 10, color: "#f1f6ff" },
+      textposition: "auto", textfont: { size: 10 },
       hovertemplate: "<b>%{y}</b><br>%{x}<extra></extra>",
     }], _layout({
       title: { text: spec.title || "", font: { size: 11 } },
@@ -298,10 +285,10 @@ const Charts = (() => {
     el.style.alignItems = "center";
     el.style.justifyContent = "center";
     el.innerHTML =
-      `<div style="text-align:center;font-family:'Share Tech Mono',monospace">
-         <div style="font-size:2.4rem;color:#52a8ff;font-weight:700;line-height:1">${count.toLocaleString()}</div>
-         <div style="font-size:.8rem;color:#e2eaf8;margin-top:6px;letter-spacing:.05em">${title || "subscribers in this set"}</div>
-         <div style="font-size:.62rem;color:#6b87a8;margin-top:10px">A per-subscriber chart isn't meaningful here —<br>use <b style="color:#34d399">⬇ Export Data</b> for the full list.</div>
+      `<div style="text-align:center;font-family:'Inter',sans-serif">
+         <div style="font-size:2.4rem;color:var(--b400);font-weight:700;line-height:1">${count.toLocaleString()}</div>
+         <div style="font-size:.8rem;color:var(--text);margin-top:6px;letter-spacing:.05em">${title || "subscribers in this set"}</div>
+         <div style="font-size:.62rem;color:var(--muted);margin-top:10px">A per-subscriber chart isn't meaningful here —<br>use <b style="color:var(--green)">⬇ Export Data</b> for the full list.</div>
        </div>`;
   }
 
@@ -386,7 +373,7 @@ const Charts = (() => {
     el.style.display = "flex";
     el.style.alignItems = "center";
     el.style.justifyContent = "center";
-    el.innerHTML = `<span style="color:#94a3b8;font-size:12px;font-family:'Share Tech Mono',monospace">
+    el.innerHTML = `<span style="color:var(--muted);font-size:12px;font-family:'Inter',sans-serif">
       ${title ? `<strong>${title}</strong><br>` : ""}No chart data available</span>`;
   }
 

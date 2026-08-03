@@ -10,6 +10,7 @@ import json
 import queue as q_module
 import threading
 import os, sys
+import re
 
 # Load .env file if present
 try:
@@ -35,7 +36,7 @@ OP_DB   = os.path.join(BASE, "operator_new.db")
 
 import NetworkAnalyzer_agent_bedrock  as _agent_bedrock
 import NetworkAnalyzer_agent_langgraph as _agent_langgraph
-from NetworkAnalyzer_agent_bedrock import query_sc, query_op, get_proactive_alerts
+from NetworkAnalyzer_agent_bedrock import query_sc, query_op, get_proactive_alerts, SC_DB
 
 app = FastAPI(title="NetworkAnalyzer Copilot")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -453,6 +454,7 @@ async def ws_chat(websocket: WebSocket, model: str = "qwen3"):
                         "steps":            result.get("steps", []),
                         "think_log":        result.get("think_log", []),
                         "truncated":        result.get("truncated", False),
+                        "map_flash":        _compute_map_flash(user_text, result),
                     }
                 }))
             except Exception:
@@ -504,6 +506,140 @@ def api_coverage():
         LIMIT 5000
     """)
     return rows
+
+
+# query_sc() takes SQL only (no params), so bind parameters on our own connection.
+def _query_sc_params(sql: str, params: tuple = ()):
+    conn = sqlite3.connect(SC_DB)
+    try:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+# Cell sites that currently have LIVE experience incidents — used to flash the
+# offending site on the coverage map. Filters mirror whatever the answer is about,
+# so we never light up sites the agent didn't actually talk about.
+def _active_incident_sites(region: str = None, service: str = None,
+                           hvc: bool = False, severity: str = None):
+    where  = "ei.status='active' AND s.latitude IS NOT NULL AND s.longitude IS NOT NULL"
+    params = []
+    if region:
+        where += " AND LOWER(s.region)=LOWER(?)"
+        params.append(region)
+    if service:
+        where += " AND LOWER(ei.affected_service)=LOWER(?)"
+        params.append(service)
+    if hvc:
+        where += " AND ei.is_hvc=1"
+    if severity:
+        where += " AND LOWER(ei.severity)=LOWER(?)"
+        params.append(severity)
+    return _query_sc_params(f"""
+        SELECT s.site_name, s.region, s.latitude, s.longitude,
+               COUNT(*)        AS incidents,
+               SUM(ei.is_hvc)  AS hvc,
+               MAX(CASE ei.severity WHEN 'critical' THEN 3 WHEN 'major' THEN 2 ELSE 1 END) AS sev_rank,
+               GROUP_CONCAT(DISTINCT ei.affected_service) AS services,
+               GROUP_CONCAT(DISTINCT ei.root_cause)       AS causes,
+               MIN(ei.started_at)                         AS since
+        FROM experience_incidents ei
+        JOIN cells c ON ei.cell_id=c.cell_id
+        JOIN sites s ON c.site_id=s.site_id
+        WHERE {where}
+        GROUP BY s.site_id
+        ORDER BY sev_rank DESC, incidents DESC
+        LIMIT 25
+    """, tuple(params))
+
+
+@app.get("/api/incidents/active-sites")
+def api_active_incident_sites(region: str = None, service: str = None,
+                              hvc: bool = False, severity: str = None):
+    return _active_incident_sites(region, service, hvc, severity)
+
+
+# Question phrasings that mean "show me who/what is having problems" — when one of
+# these fires AND there are live incidents, we flash the sites on the map.
+_ISSUE_MARKERS = re.compile(
+    r"\b(issue|issues|problem|problems|struggling|degrad|outage|incident|incidents|"
+    r"complain|poor experience|bad experience|buffering|streaming issue|"
+    r"having (?:trouble|issues|problems)|affected|impacted|experiencing|right now|"
+    r"at this moment|currently|live issue)\b", re.I)
+
+# Known region names, so "issues in Ba Sing Se" flashes only that region.
+def _known_regions():
+    global _REGION_CACHE
+    try:
+        return _REGION_CACHE
+    except NameError:
+        pass
+    try:
+        _REGION_CACHE = [r["region"] for r in query_sc("SELECT DISTINCT region FROM sites")]
+    except Exception:
+        _REGION_CACHE = []
+    return _REGION_CACHE
+
+# Service names as a user would phrase them → the affected_service value in the log.
+_SERVICE_FROM_Q = [
+    (re.compile(r"\b(stream|streams|streaming|video|buffering)\b", re.I), "video streaming"),
+    (re.compile(r"\b(voice|call|calls|calling|volte)\b", re.I),           "voice calls"),
+    (re.compile(r"\b(mobile data|browsing|internet)\b", re.I),            "mobile data"),
+    (re.compile(r"\b(outage|outages|all services)\b", re.I),             "all services"),
+]
+_HVC_FROM_Q = re.compile(r"\b(hvc|hvcs|high[- ]value|gold|platinum|premium|vip)\b", re.I)
+
+
+def _flash_filters(question: str, result: dict = None):
+    """What we flash must match what the ANSWER is about, or the map lights up sites
+    the agent never mentioned. Prefer the filters the agent ACTUALLY used in its SQL
+    (exact match to the answer); only fall back to reading the question when it never
+    touched the incident log."""
+    f = {"region": None, "service": None, "hvc": False, "severity": None}
+
+    sql_blob = " ".join(
+        (s.get("sql") or "") for s in (result or {}).get("steps", [])
+        if "experience_incidents" in (s.get("sql") or "").lower()
+    )
+
+    if sql_blob:
+        # Trust the agent's own WHERE clause — it defines the answer's scope exactly.
+        m = re.search(r"affected_service\s*=\s*'([^']+)'", sql_blob, re.I)
+        if m: f["service"] = m.group(1)
+        m = re.search(r"\bseverity\s*=\s*'([^']+)'", sql_blob, re.I)
+        if m: f["severity"] = m.group(1)
+        m = re.search(r"\bregion\s*=\s*'([^']+)'", sql_blob, re.I)
+        if m: f["region"] = m.group(1)
+        if re.search(r"is_hvc\s*=\s*1", sql_blob, re.I):
+            f["hvc"] = True
+        return f
+
+    # No incident SQL (e.g. answered from context) — infer scope from the question.
+    for rx, svc in _SERVICE_FROM_Q:
+        if rx.search(question):
+            f["service"] = svc
+            break
+    f["hvc"] = bool(_HVC_FROM_Q.search(question))
+    ql = question.lower()
+    f["region"] = next((r for r in _known_regions() if r and r.lower() in ql), None)
+    return f
+
+
+def _compute_map_flash(question: str, result: dict = None):
+    """Return the list of sites to flash on the coverage map for an issue-style
+    question, else []. Deterministic: driven by the experience_incidents table,
+    scoped to whatever the agent's answer actually covered."""
+    if not question or not _ISSUE_MARKERS.search(question):
+        return []
+    try:
+        f = _flash_filters(question, result)
+        return _active_incident_sites(f["region"], f["service"], f["hvc"], f["severity"])
+    except Exception as e:
+        # Never break the chat over the map — but don't fail silently either:
+        # a swallowed TypeError here once hid the flash being broken entirely.
+        print(f"[map_flash] failed: {e!r}")
+        return []
 
 # ── Charts (snapshot panel) ───────────────────────────────────────────
 

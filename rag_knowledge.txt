@@ -138,7 +138,7 @@ HVC (High Value Customer): Typically platinum + gold tiers. These subscribers wa
 
 ARPU and DOU together: Revenue per GB = ARPU / DOU. Low revenue-per-GB with high DOU indicates a subscriber consuming significant network resources at low yield — upgrade or FWA conversion opportunity.
 
-CLV (Customer Lifetime Value): ARPU / Monthly Churn Rate. A subscriber paying 50 TND/month with 1% monthly churn has CLV of 5000 TND.
+CLV (Customer Lifetime Value): ARPU / Monthly Churn Rate. A subscriber paying 50 Yuan/month with 1% monthly churn has CLV of 5000 Yuan.
 ==END==
 
 ==DOC==

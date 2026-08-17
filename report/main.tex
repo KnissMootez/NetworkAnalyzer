@@ -1,0 +1,98 @@
+%% main.tex 2025/04/04
+%
+% Based on sample files of unknown authorship.
+%
+% The Current Maintainer of this work is ICT Department @ ENIT.
+% National Engineering School of Tunis. https://enit.rnu.tn/
+% Information and Communication Technologies Department
+
+\documentclass[a4paper,12pt, final]{report}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{acronym}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{comment}
+\usepackage{caption}
+\usepackage{dirtytalk}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+\usepackage{float}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{indentfirst}
+\usepackage{lmodern}
+\usepackage{longtable}
+\usepackage{makecell}
+\usepackage{mathrsfs}
+\usepackage{microtype}
+\usepackage[nottoc]{tocbibind}
+\usepackage{siunitx}
+\usepackage{textpos}
+\usepackage{titlesec}
+\usepackage{url}
+\usetikzlibrary{positioning, fit, calc, arrows.meta}
+\usepackage[pages=some]{background}
+%\captionsetup[table]{position=bottom}
+\numberwithin{equation}{section}
+
+%pagestyle
+\pagestyle{fancy}
+\fancyhf{}
+\cfoot{\thepage}
+\newcommand{\euro}{\EUR\xspace}
+
+\begin{document}
+\input{pagePFE}
+\thispagestyle{empty}
+\newpage
+\thispagestyle{empty}
+\newpage
+\newpage
+\input{Dedication}
+\newpage
+\input{Acknowledgment.tex}
+\input{Abstract.tex}
+
+
+\thispagestyle{empty}
+\newpage
+
+\vspace{2\baselineskip}
+
+\tableofcontents
+\thispagestyle{empty}
+
+\listoffigures
+\listoftables
+\thispagestyle{empty}
+\newpage
+\input{Acronyms}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\input{Introduction}
+
+\input{Chapter1}
+\input{Chapter2}
+\input{Chapter3}
+\input{Chapter4}
+\input{Chapter5}
+
+\input{Conclusion}
+
+%\bibliographystyle{abbrv}
+%  classe les entrées par ordre alphabétique
+%\bibliographystyle{unsrt} 
+\bibliographystyle{unsrturl}
+% trie les entrées par ordre d'apparition dans le texte
+\bibliography{references}
+\end{document}

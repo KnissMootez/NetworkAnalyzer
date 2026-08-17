@@ -1,0 +1,12 @@
+# LaTeX build artifacts — regenerate on compile, not source
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.lof
+*.lot
+*.out
+*.synctex.gz
+*.toc

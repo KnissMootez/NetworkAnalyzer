@@ -1,0 +1,274 @@
+\chapter{Building the Foundation — Data and First Prototype}\label{chapter:BF-DFP}
+
+
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+After studying how SmartCare works and going through its documentation, one thing was immediately obvious --- this isn't a platform you can just plug into and start pulling data from. SmartCare is a commercial solution deployed across multiple Huawei customers worldwide, meaning any real data it holds is confidential by nature, and altering or accessing it directly would affect live operator environments. Not an option.
+
+So to ensure confidentiality while still building something realistic, we turned to the TM Forum framework --- the open industry standard that defines the data models and component architecture used across the telecom industry. SmartCare itself is a TM Forum ODA-certified product \cite{huawei_tmforum}, meaning its structure directly reflects that standard. Using TM Forum's component taxonomy \cite{tmforum_sid} as our blueprint, we designed a database that replicates the kind of data a platform like SmartCare would operate on, without relying on any proprietary or confidential information.
+
+From there, we built two SQLite databases inspired by that taxonomy, populated with \(\sim\)50,000 synthetic subscribers. This is what the agent works on throughout the rest of the project.
+
+
+
+\section{Database Design}
+
+The data layer is split into two separate SQLite databases, each with a distinct responsibility --- a separation that mirrors the classic OSS/BSS divide in telecom architecture \cite{tmforum_sid}.
+
+The two databases are linked by a single key --- the \texttt{msisdn}, which is the subscriber's phone number. Every table on both sides that relates to a specific subscriber uses the \texttt{msisdn} as its identifier, making cross-database joins straightforward. This design keeps network and commercial data cleanly separated while still allowing the agent to query across both when needed --- for example, correlating a subscriber's poor QoE scores with their churn risk and current plan.
+
+The schema was designed to cover the main data domains that TM Forum's Information Framework defines for a telecom operator \cite{tmforum_sid}: resource and network management, service usage, customer and party management, billing, and product catalog.
+
+\subsection{Network Database}
+
+\texttt{NetworkAnalyzer\_new.db} covers everything on the network and operational side, organized into five groups:
+
+\textbf{Infrastructure} --- the physical layer. The \texttt{sites} table holds base station locations across 24 regions, and \texttt{cells} holds the individual radio cells attached to each site, with their technology generation (2G/3G/4G/5G) and frequency band.
+
+\textbf{Subscribers} --- the subscriber layer. The \texttt{subscribers} table holds core identity and location data. \texttt{subscriber\_technology} tracks each subscriber's current active technology and VoLTE status. \texttt{devices} holds device capability information --- whether the handset supports 5G, VoLTE, or Wi-Fi calling. \texttt{coverage} maps which cells a subscriber can reach from their home location.
+
+\textbf{KPIs} --- network performance. \texttt{kpis\_daily} holds per-cell daily averages for RSRP, SINR, throughput, drop rate, latency, and congestion level. \texttt{kpis\_hourly} provides finer granularity for intraday analysis.
+
+\textbf{Usage} --- what subscribers actually consume. \texttt{dou\_monthly} tracks total data usage per subscriber per month. \texttt{ott\_monthly} breaks that down by app category --- streaming, gaming, web, VoIP, and social --- alongside SMS count and voice minutes. \texttt{mobility\_profile} captures how many distinct cells a subscriber visits each month, their mobility class, and whether they are a Fixed Wireless Access (FWA) candidate. \texttt{roaming\_usage} tracks data and voice consumption abroad.
+
+\textbf{Quality of Experience} --- how the network feels to the end user. \texttt{qoe\_daily} holds per-subscriber daily experience scores per app type. \texttt{signal\_quality} tracks RSRP and SINR at the subscriber level. \texttt{streaming\_quality}, \texttt{web\_quality}, and \texttt{voip\_quality} hold monthly aggregated scores for each service type --- with VoIP entries only generated for subscribers on 4G with VoLTE active, or on 5G.
+
+\textbf{Operations} --- network events. \texttt{network\_alarms} and \texttt{network\_incidents} track cell-level faults and outages. \texttt{complaints} logs subscriber-reported issues, with categories that reflect the subscriber's technology tier. \texttt{nps\_scores} holds monthly Net Promoter Score submissions per subscriber.
+
+\subsection{Operator Database}
+
+\texttt{operator\_new.db} covers the commercial side, organized into three groups:
+
+\textbf{Customers} --- the commercial identity layer. The \texttt{customers} table holds subscriber profile data: name, demographics, region, and segment. \texttt{subscriptions} tracks which plan each subscriber is on and their contract type. \texttt{plans} defines the available offerings --- data caps, speeds, pricing, and flags for 5G, VoLTE, FWA, and MBB support.
+
+\textbf{Financials} --- revenue and risk. \texttt{billing} holds monthly invoices per subscriber, broken down into data and voice charges. \texttt{customer\_value} tracks ARPU and value segment (bronze, silver, gold, platinum) per subscriber per month, and also holds the churn risk score and churn label computed by the machine learning model --- more on that in a later chapter.
+
+\textbf{Campaigns} --- commercial actions. \texttt{campaigns} defines operator-initiated outreach campaigns. \texttt{campaign\_targets} maps which subscribers are targeted by each campaign and tracks conversion. \texttt{offers} holds the actual commercial offers attached to campaigns. \texttt{offer\_assignments} tracks which offer was sent to which subscriber and whether it was accepted. \texttt{sms\_log} records every notification sent. \texttt{service\_interruptions} logs cases where a subscriber experienced a service outage, for correlation with churn and complaint analysis.
+
+\subsection{Schema Overview}
+
+Figure~\ref{fig:schema-overview}, on page~\pageref{fig:schema-overview},
+lays out both databases side by side, grouped the same way they were
+just described above: the network-side groups (Infrastructure,
+Subscribers, KPIs, Usage, Quality of Experience, Operations) on the
+left, and the commercial-side groups (Customers, Financials, Campaigns)
+on the right. The single connector between them is
+\texttt{msisdn} — every subscriber-linked table on either side carries it,
+which is what makes a cross-database question (``correlate this
+subscriber's QoE with their churn risk and current plan'') a plain join.
+
+Why does the left side of Figure~\ref{fig:schema-overview} have twice as
+many groups as the right? Not an accident. The network domain naturally
+produces far more distinct data grains --- per-cell, per-hour, per-app ---
+than the commercial side, which mostly reduces to who a customer is and
+what they have been billed or offered. That imbalance actually foreshadows
+a real design decision made later in the agent (Chapter~5): when a
+question touches both domains, the agent has to decide which side to
+query first, and that decision is a lot easier when the boundary is this
+visible from the start. The grouping here is not just illustrative either
+--- it is close to literally how the agent's own schema retriever
+organizes itself: every table gets tagged with its owning database, and
+that tag is what routes a question before a single query gets written.
+
+\begin{figure}[p]
+\centering
+\definecolor{netblue}{HTML}{4A6FA5}
+\definecolor{opbrown}{HTML}{B5793A}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  netgroup/.style={rectangle, rounded corners=3pt, draw=netblue, thick,
+    fill=netblue!6, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
+  opgroup/.style={rectangle, rounded corners=3pt, draw=opbrown, thick,
+    fill=opbrown!8, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
+]
+
+% ---- left column: NetworkAnalyzer_new.db ----
+\node[netgroup, name=g1] {\textbf{\normalsize Infrastructure}\\[3pt]
+  $\bullet$~\texttt{sites}\\ $\bullet$~\texttt{cells}};
+\node[netgroup, name=g2, below=5mm of g1] {\textbf{\normalsize Subscribers}\\[3pt]
+  $\bullet$~\texttt{subscribers}\\ $\bullet$~\texttt{subscriber\_technology}\\
+  $\bullet$~\texttt{devices}\\ $\bullet$~\texttt{coverage}};
+\node[netgroup, name=g3, below=5mm of g2] {\textbf{\normalsize KPIs}\\[3pt]
+  $\bullet$~\texttt{kpis\_daily}\\ $\bullet$~\texttt{kpis\_hourly}};
+\node[netgroup, name=g4, below=5mm of g3] {\textbf{\normalsize Usage}\\[3pt]
+  $\bullet$~\texttt{dou\_monthly}\\ $\bullet$~\texttt{ott\_monthly}\\
+  $\bullet$~\texttt{mobility\_profile}\\ $\bullet$~\texttt{roaming\_usage}};
+\node[netgroup, name=g5, below=5mm of g4] {\textbf{\normalsize Quality of Experience}\\[3pt]
+  $\bullet$~\texttt{qoe\_daily}\\ $\bullet$~\texttt{signal\_quality}\\
+  $\bullet$~\texttt{streaming\_quality}\\ $\bullet$~\texttt{web\_quality}\\
+  $\bullet$~\texttt{voip\_quality}};
+\node[netgroup, name=g6, below=5mm of g5] {\textbf{\normalsize Operations}\\[3pt]
+  $\bullet$~\texttt{network\_alarms}\\ $\bullet$~\texttt{network\_incidents}\\
+  $\bullet$~\texttt{complaints}\\ $\bullet$~\texttt{nps\_scores}};
+
+\node[draw=netblue, thick, rounded corners=6pt, fit=(g1)(g2)(g3)(g4)(g5)(g6),
+  inner sep=10pt,
+  label={[font=\bfseries, label distance=8pt]above:NetworkAnalyzer\_new.db\ (network domain)}]
+  (leftbox) {};
+
+% ---- right column: operator_new.db — Financials anchored to leftbox's ----
+% ---- vertical middle, Customers/Campaigns built up/down from there ----
+\node[opgroup, name=h2] at ($(leftbox.east)+(4.5cm,0)$)
+  {\textbf{\normalsize Financials}\\[3pt]
+  $\bullet$~\texttt{billing}\\ $\bullet$~\texttt{customer\_value}};
+\node[opgroup, name=h1, above=8mm of h2] {\textbf{\normalsize Customers}\\[3pt]
+  $\bullet$~\texttt{customers}\\ $\bullet$~\texttt{subscriptions}\\ $\bullet$~\texttt{plans}};
+\node[opgroup, name=h3, below=8mm of h2] {\textbf{\normalsize Campaigns}\\[3pt]
+  $\bullet$~\texttt{campaigns}\\ $\bullet$~\texttt{campaign\_targets}\\
+  $\bullet$~\texttt{offers}\\ $\bullet$~\texttt{offer\_assignments}\\
+  $\bullet$~\texttt{sms\_log}\\ $\bullet$~\texttt{service\_interruptions}};
+
+\node[draw=opbrown, thick, rounded corners=6pt, fit=(h1)(h2)(h3),
+  inner sep=10pt,
+  label={[font=\bfseries, label distance=8pt]above:operator\_new.db\ (commercial domain)}]
+  (rightbox) {};
+
+% ---- msisdn connector ----
+\draw[<->, thick] (leftbox.east) -- (rightbox.west);
+\node[fill=yellow!15, draw, rounded corners, align=center, font=\ttfamily\bfseries,
+  inner sep=5pt] at ($(leftbox.east)!0.5!(rightbox.west)$)
+  {msisdn\\ {\normalfont\itshape\footnotesize shared join key}};
+
+\end{tikzpicture}%
+}
+\caption{Schema overview: table groupings in each database, joined on \texttt{msisdn}.}
+\label{fig:schema-overview}
+\end{figure}
+
+\subsection{Design Rationale}
+
+A few choices behind the schema are worth calling out, since they shaped
+everything built on top of it later. First, SQLite: no server to stand up,
+a single portable file per database, and more than enough for \textasciitilde50{,}000
+subscribers — for a prototype at this scale, anything heavier would have
+been overkill.
+
+Second, the two-database split. It would have been simpler, technically,
+to dump everything into one file. But keeping network and commercial data
+apart mirrors the real OSS/BSS boundary operators actually work with, and
+it turned out to matter later: the agent needs to decide which domain a
+question belongs to before it can write a query, and having that boundary
+already baked into the data made that routing logic far more natural than
+if everything lived in one undifferentiated pile of tables.
+
+Third, the join key. Every subscriber-linked table on both sides uses a
+single \texttt{msisdn} column, with no foreign key constraints enforced.
+SQLite barely enforces them anyway, so nothing was really lost. The
+trade-off is deliberate: referential integrity becomes the generation
+code's job instead of the database's. Fine trade, since every row in
+this environment is written by scripts we control in the first place.
+
+
+\subsection{Confidentiality Through a Fictional Geography}
+
+Even though the schema itself is grounded in TM Forum's real abstractions,
+none of the region, city, or site names in the data are real — they are
+entirely invented. This was a deliberate choice: giving synthetic regions
+recognizable real-world names would create an association with an actual
+country or an actual Huawei customer network that simply is not there, and
+that is exactly the kind of confusion this project needed to avoid from
+day one. Once the decision was made to invent a geography rather than
+borrow a real one, it made sense to commit to it properly rather than
+leave it half-fictional — so every region, city, and site name in the
+data comes from one consistent invented world, giving the whole
+environment a coherent identity without it being mistakable for any real
+operator's network. Figure~\ref{fig:ch2-fictional-data} shows what that
+actually looks like in the raw data — recognizably structured telecom
+records, with none of the geography being real.
+
+% =====================================================================
+% SCREENSHOT NEEDED --- figures/ch2-fictional-data.png
+% Where: any SQLite browser (DB Browser for SQLite) open on
+% NetworkAnalyzer_new.db, OR the analytics dashboard's Subscribers
+% section (localhost:8002).
+% What to capture: a handful of rows from the subscribers table (or the
+% dashboard's subscriber list) with the region/city columns visible,
+% clearly showing the invented place names rather than real ones.
+% =====================================================================
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/ch2-fictional-data.png}
+\caption{A sample of subscriber records, showing the invented regions
+and cities used throughout the dataset instead of any real geography.}
+\label{fig:ch2-fictional-data}
+\end{figure}
+
+\section{First Prototype: A Local Agent Loop}
+
+With the databases in place, the next question was whether the actual
+idea — ask a question in plain English, get a SQL-backed answer — could
+work at all before worrying about making it fast or polished. The fastest
+way to find out was to wire up a minimal agent loop against a model
+running entirely locally, no cloud dependency, no API cost, nothing to
+wait on.
+\subsection{Getting a Loop Working}
+The first version ran on Ollama~\cite{ollama} with a local qwen
+model~\cite{qwen} — 7B, later bumped to 8B — driving a single-step
+reasoning loop built around plain text tags rather than anything
+structured: \ldots the model would read the question and respond with a \texttt{QUERY\_SC:} or \texttt{QUERY\_OP:}
+tag followed by raw SQL, the loop would run that query against the
+matching database, feed the result back, and repeat until the model
+wrote a \texttt{CONCLUDE:} tag with its final answer. No tool-calling
+API, no structured output — just a prompt format the model had to follow
+by convention, parsed back out with regular expressions on this end.
+
+The interface for this first version was a heavily customized Streamlit
+app (Figure~\ref{fig:streamlit-prototype}) — dark theme, custom fonts,
+a chat panel next to a live snapshot area for charts. It let every hour
+go toward the agent loop instead of frontend code, since Streamlit
+handles the layout and reactivity out of the box.
+
+Crude as it was, it proved the core idea worked: the model could turn a
+natural-language question into a real query against the schema from
+Section~2.1, chain a couple of query steps together when one was not
+enough, and land on something coherent. That was enough to justify
+continuing down this path — the tag-based format itself stuck around
+much longer than the local models did, and still shows up later in the
+report as the fallback path once tool-calling was introduced.
+
+But the same screenshot also shows the limitation head-on: the question
+asked for a drilldown tree of technologies used against terminal
+capability, and the agent answered with a dense block of raw counts
+instead — while the ``Live Snapshot'' panel next to it stayed completely
+empty. The reasoning loop could get the numbers right; turning those
+numbers into the visual the question actually asked for was a separate
+problem this first prototype had not solved yet.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/streamlit_prototype.png}
+    \caption{The first Streamlit prototype — a drilldown-tree question answered with raw counts and no chart, exposing the gap between correct data and a correct visualization.}
+    \label{fig:streamlit-prototype}
+\end{figure}
+
+
+\subsection{Hitting the Hardware Ceiling}
+
+What that first loop did not prove was that local inference was viable to
+actually use. It ran on an RTX 3050 with 4~GB of VRAM — enough to load a
+7B–8B model, but not enough headroom to serve it at a usable latency once
+the prompt included schema context and a few turns of conversation.
+Every step of the loop meant another full model call, and with local
+inference this slow, a question that should feel instant took long enough
+to make the whole point of the project — ``ask a question, get an
+answer'' — feel broken rather than fast. Bigger local models were an
+option in theory, but the same 4~GB ceiling that made 7B–8B slow was only
+going to make anything larger worse, not better. That hardware ceiling is
+what forced the next decision, covered in the following chapter: whether
+to keep pushing on local models or move the reasoning off-device entirely.
+
+
+
+\section*{Conclusion}
+
+This chapter laid the foundation everything else in this report builds on:
+two SQLite databases, joined on \texttt{msisdn}, split along the same
+network/commercial line real operators use, populated with
+\textasciitilde50{,}000 synthetic but internally consistent subscribers
+across a fictional geography. On top of that data, a first agent loop
+proved the core idea could work — but running it on a local 7B–8B model
+made clear that hardware was going to be the limiting factor, not the
+idea itself. The next chapter picks up exactly there.
+
+\addcontentsline{toc}{section}{Conclusion}
+
+

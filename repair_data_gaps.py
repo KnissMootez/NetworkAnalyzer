@@ -41,11 +41,35 @@ def _months_between(start_month: str, end_month: str):
         out.append(cur.strftime("%Y-%m"))
 
 
-def _segment_for(arpu):
-    if arpu >= 80:   return "platinum", 1
-    if arpu >= 45:   return "gold",     1
-    if arpu >= 25:   return "silver",   0
-    return "bronze", 0
+def _segment_for(arpu, month=None):
+    """Delegates to the simulator's single definition — no second copy of the rule."""
+    return S.classify_value(arpu, month)
+
+
+def reclassify_segments(dry_run=False):
+    """Rewrite value_segment/is_hvc for every month against that month's own ARPU
+    distribution. The old fixed cutoffs (platinum at 80 Yuan) predated update_arpu.py's
+    rescaling, so 88.5% of the base was flagged high-value and the label meant nothing."""
+    months = [r[0] for r in S.op_query("SELECT DISTINCT month FROM customer_value ORDER BY 1")]
+    print(f"  {len(months)} months to reclassify")
+    total = changed = hvc_now = 0
+    for month in months:
+        th = S.value_thresholds(month, refresh=True)
+        rows = S.op_query("SELECT msisdn, arpu, value_segment, is_hvc FROM customer_value "
+                          "WHERE month=?", (month,))
+        updates = []
+        for msisdn, arpu, seg_old, hvc_old in rows:
+            seg, hvc = S.classify_value(arpu, thresholds=th)
+            total += 1
+            hvc_now += hvc
+            if seg != seg_old or hvc != hvc_old:
+                changed += 1
+                updates.append((seg, hvc, msisdn, month))
+        if updates and not dry_run:
+            S.op_write_many("UPDATE customer_value SET value_segment=?, is_hvc=? "
+                            "WHERE msisdn=? AND month=?", updates)
+    print(f"  {total:,} rows, {changed:,} reclassified, {hvc_now:,} now HVC "
+          f"({100.0*hvc_now/total:.1f}%)" if total else "  nothing to do")
 
 
 def fill_customer_value_gap(dry_run=False):
@@ -73,7 +97,7 @@ def fill_customer_value_gap(dry_run=False):
             arpu = round(prev[0] * random.uniform(0.97, 1.05), 2) if prev \
                 else round(random.uniform(5, 150), 2)
             arpu = max(2.0, arpu)
-            seg, hvc = _segment_for(arpu)
+            seg, hvc = _segment_for(arpu, month)
             state[msisdn] = (arpu, seg, hvc)
             rows.append((msisdn, month, arpu, seg, hvc))
 
@@ -220,16 +244,18 @@ def main():
 
     mode = " (DRY RUN)" if args.dry_run else ""
     print(f"\n=== REPAIRING DATA GAPS{mode} ===\n")
-    print("[1/5] customer_value gap")
+    print("[1/6] customer_value gap")
     fill_customer_value_gap(args.dry_run)
-    print("\n[2/5] billing (unfreezes once customer_value advances)")
+    print("\n[2/6] billing (unfreezes once customer_value advances)")
     unfreeze_billing(args.dry_run)
-    print("\n[3/5] retire phantom alarms (cells serving nobody)")
+    print("\n[3/6] retire phantom alarms (cells serving nobody)")
     retire_phantom_alarms(args.dry_run)
-    print("\n[4/5] retire uncoupled legacy alarms (real cells, random placement)")
+    print("\n[4/6] retire uncoupled legacy alarms (real cells, random placement)")
     retire_uncoupled_alarms(args.dry_run)
-    print(f"\n[5/5] synthesise correlated alarm history ({args.alarm_days} days)")
+    print(f"\n[5/6] synthesise correlated alarm history ({args.alarm_days} days)")
     synthesize_alarm_history(args.alarm_days, args.dry_run)
+    print("\n[6/6] reclassify value segments against the live ARPU distribution")
+    reclassify_segments(args.dry_run)
     if not args.dry_run:
         report()
 

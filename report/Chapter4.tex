@@ -160,8 +160,11 @@ that class of fault actually behaves in a real network:
     are more people to congest.
     \item \textbf{Subscriber-scoped} (throughput throttling, a DNS or
     CDN hiccup, a dropped VoLTE bearer) --- exactly one customer,
-    biased toward gold and platinum tiers, the segment retention
-    questions actually care about.
+    biased toward high-value ones, the segment retention questions
+    actually care about. ``High-value'' here is not a fixed ARPU
+    threshold but the top decile of the live distribution, re-tested
+    whenever a subscriber's revenue moves --- so the label keeps
+    meaning something even as ARPU drifts.
 \end{itemize}
 
 Once a site- or cell-scoped incident fires, every subscriber caught in

@@ -207,6 +207,60 @@ def op_write_many(sql, rows, batch_size=5000):
 # KPI GENERATION HELPERS
 # ═══════════════════════════════════════════════════════════════════════
 
+# ── Customer value segmentation ──────────────────────────────────────────
+# Segments are PERCENTILE BANDS of the live ARPU distribution, never fixed Yuan
+# amounts. The old hardcoded cutoffs (arpu>=80 -> platinum, >=45 -> gold, both
+# flagged HVC) were written for a base whose ARPU sat around 30-50. update_arpu.py
+# later rebuilt ARPU on a city-tier model with a median near 107, and nothing
+# revisited the cutoffs — so the median customer cleared the platinum bar and
+# 88.5% of the base came out "high value", which makes the label mean nothing.
+#
+# Reading the bands off the live distribution instead means the shape holds no
+# matter how ARPU is rescaled later, and a subscriber's status is re-derived from
+# their current numbers rather than frozen at whatever it was when they were created.
+SEGMENT_BANDS = [            # (segment, percentile floor), richest first
+    ("platinum", 90),
+    ("gold",     70),
+    ("silver",   30),
+    ("bronze",    0),
+]
+HVC_SEGMENTS = frozenset(("platinum",))   # top 10% of the base
+
+_thresholds_cache = {}       # month -> {segment: arpu floor}
+
+def value_thresholds(month=None, refresh=False):
+    """ARPU floor per segment, read off the live distribution for `month`.
+    Cached per month — this is 4 ordered lookups, not something to run per row."""
+    month = month or datetime.now().strftime("%Y-%m")
+    if not refresh and month in _thresholds_cache:
+        return _thresholds_cache[month]
+    total = op_query("SELECT COUNT(*) FROM customer_value WHERE month=?", (month,))
+    n = total[0][0] if total else 0
+    if not n:
+        return {seg: 0.0 for seg, _ in SEGMENT_BANDS}   # no data yet: everyone bronze
+    out = {}
+    for seg, pct in SEGMENT_BANDS:
+        if pct <= 0:
+            out[seg] = 0.0
+            continue
+        row = op_query("SELECT arpu FROM customer_value WHERE month=? ORDER BY arpu "
+                       "LIMIT 1 OFFSET ?", (month, min(n - 1, int(n * pct / 100))))
+        out[seg] = row[0][0] if row else 0.0
+    _thresholds_cache[month] = out
+    return out
+
+
+def classify_value(arpu, month=None, thresholds=None):
+    """(value_segment, is_hvc) for an ARPU, against the CURRENT distribution.
+    Single source of truth — every place that writes customer_value goes through
+    here, so the definition can never drift between call sites again."""
+    th = thresholds if thresholds is not None else value_thresholds(month)
+    for seg, _pct in SEGMENT_BANDS:
+        if arpu >= th.get(seg, 0.0):
+            return seg, (1 if seg in HVC_SEGMENTS else 0)
+    return "bronze", 0
+
+
 TECH_BASE = {
     "2G": dict(rsrp=-95, sinr=8,  dl=2,   ul=0.5, drop=1.8, avail=98.5, lat=300),
     "3G": dict(rsrp=-90, sinr=11, dl=8,   ul=2,   drop=1.2, avail=99.0, lat=120),
@@ -481,8 +535,9 @@ def backfill_monthly_sc():
 
 def backfill_monthly_op():
     """Fill billing and customer_value for past 12 months."""
-    _max = op_query("SELECT MAX(month) FROM customer_value")
-    _ref = datetime.strptime(_max[0][0], "%Y-%m") if _max and _max[0][0] else datetime(2026, 3, 1)
+    # Anchored on today, not on MAX(month) FROM customer_value: when that table froze,
+    # this window froze with it and billing stopped getting new months as a side effect.
+    _ref = datetime.now()
     months = [(_ref - timedelta(days=30 * i)).strftime("%Y-%m") for i in range(11, -1, -1)]
 
     msisdns = [r[0] for r in op_query("SELECT msisdn FROM customers WHERE is_active=1")]
@@ -494,10 +549,7 @@ def backfill_monthly_op():
         for msisdn in msisdns:
             if (msisdn, m) not in existing_cv:
                 arpu = round(random.uniform(5, 150), 2)
-                if arpu >= 80:   seg = "platinum"; hvc = 1
-                elif arpu >= 45: seg = "gold";     hvc = 1
-                elif arpu >= 25: seg = "silver";   hvc = 0
-                else:            seg = "bronze";   hvc = 0
+                seg, hvc = classify_value(arpu, m)
                 cv_rows.append((msisdn, m, arpu, seg, hvc))
     if cv_rows:
         print(f"  [BACKFILL] customer_value: inserting {len(cv_rows):,} rows …")
@@ -819,10 +871,12 @@ def _gen_nps(msisdn, month, segment):
 def backfill_new_tables(verbose=False):
     """Fill signal_quality (daily, 30 days), and monthly tables for 12 months."""
     if verbose: print("  [BACKFILL] Starting new tables …")
-    _max = op_query("SELECT MAX(month) FROM nps_scores")
-    _max_cv = op_query("SELECT MAX(month) FROM customer_value")
-    _ref_str = (_max[0][0] if _max and _max[0][0] else None) or (_max_cv[0][0] if _max_cv and _max_cv[0][0] else None)
-    _ref  = datetime.strptime(_ref_str, "%Y-%m") if _ref_str else datetime(2026, 3, 1)
+    # Anchor the window on TODAY, never on a table's own MAX(month). This used to read
+    # MAX(month) FROM nps_scores -- one of the tables it fills -- so once nps_scores
+    # stopped advancing the window stopped with it, and it could never advance again.
+    # A self-anchoring backfill freezes permanently and silently; these five monthly
+    # tables sat four months stale that way.
+    _ref  = datetime.now()
     today = _ref.date()
     months = [(_ref - timedelta(days=30 * i)).strftime("%Y-%m") for i in range(11, -1, -1)]
 
@@ -970,7 +1024,7 @@ def backfill_new_tables(verbose=False):
         hvc_pool = op_query("""
             SELECT msisdn, value_segment, is_hvc FROM customer_value
             WHERE month=(SELECT MAX(month) FROM customer_value)
-              AND value_segment IN ('gold','platinum')
+              AND is_hvc=1
             ORDER BY RANDOM() LIMIT 200
         """)
         region_map = dict(sc_query("SELECT msisdn, region FROM subscribers"))
@@ -1134,13 +1188,11 @@ def ensure_current_month(verbose=False):
             """, (msisdn,))
             if prev:
                 arpu = round(prev[0][0] * random.uniform(0.95, 1.05), 2)
-                seg  = prev[0][1]; hvc = prev[0][2]
             else:
                 arpu = round(random.uniform(5, 150), 2)
-                if arpu >= 80:   seg = "platinum"; hvc = 1
-                elif arpu >= 45: seg = "gold";     hvc = 1
-                elif arpu >= 25: seg = "silver";   hvc = 0
-                else:            seg = "bronze";   hvc = 0
+            # re-derived from the new ARPU, not carried over from last month:
+            # a subscriber who drifts out of the top decile stops being an HVC
+            seg, hvc = classify_value(arpu, month)
             cv_rows.append((msisdn, month, arpu, seg, hvc))
         op_write_many("INSERT OR IGNORE INTO customer_value "
                       "(msisdn, month, arpu, value_segment, is_hvc) VALUES(?,?,?,?,?)", cv_rows)
@@ -1414,7 +1466,7 @@ def _incident_targets(scope, active_now):
         for (m,) in op_query("""
             SELECT msisdn FROM customer_value
             WHERE month=(SELECT MAX(month) FROM customer_value)
-              AND value_segment IN ('gold','platinum')
+              AND is_hvc=1
             ORDER BY RANDOM() LIMIT 8
         """):
             if m not in active_now:
@@ -1614,13 +1666,19 @@ def simulate_arpu_update(verbose=False):
         SELECT msisdn, arpu FROM customer_value WHERE month=?
         ORDER BY RANDOM() LIMIT 100
     """, (month,))
+    # Refresh the bands once per call: ARPU has just moved for a batch of people, and
+    # the bands are percentiles of that same distribution. This is where HVC status is
+    # actually re-tested — a subscriber whose ARPU drifts below the top decile loses it,
+    # and one who climbs into it gains it, without anyone editing a threshold.
+    th = value_thresholds(month, refresh=True)
     updated = 0
+    promoted = demoted = 0
     for msisdn, old_arpu in subs:
         new_arpu = round(max(5.0, old_arpu * random.uniform(0.97, 1.05)), 2)
-        if new_arpu >= 80:   seg = "platinum"; hvc = 1
-        elif new_arpu >= 45: seg = "gold";     hvc = 1
-        elif new_arpu >= 25: seg = "silver";   hvc = 0
-        else:                seg = "bronze";   hvc = 0
+        was_hvc = classify_value(old_arpu, thresholds=th)[1]
+        seg, hvc = classify_value(new_arpu, thresholds=th)
+        promoted += (hvc and not was_hvc)
+        demoted  += (was_hvc and not hvc)
         op_write("""
             UPDATE customer_value
             SET arpu=?, value_segment=?, is_hvc=?
@@ -1636,7 +1694,9 @@ def simulate_arpu_update(verbose=False):
         _rescore_churn(msisdn_list, month, op_conn, sc_conn)
         op_conn.close(); sc_conn.close()
 
-    if verbose: print(f"  [ARPU] Updated {updated} customer value records")
+    if verbose:
+        churn = f", HVC +{promoted}/-{demoted}" if (promoted or demoted) else ""
+        print(f"  [ARPU] Updated {updated} customer value records{churn}")
 
 
 def simulate_voice_update(verbose=False):
@@ -2086,10 +2146,7 @@ def _insert_new_subscriber(verbose=False):
                  (msisdn, plan[0][0], now))
 
     arpu = round(random.uniform(5, 150), 2)
-    if arpu >= 80:   vseg = "platinum"; hvc = 1
-    elif arpu >= 45: vseg = "gold";     hvc = 1
-    elif arpu >= 25: vseg = "silver";   hvc = 0
-    else:            vseg = "bronze";   hvc = 0
+    vseg, hvc = classify_value(arpu, month)
     # Insert current month + 11 historical months so backfill never sees gaps for this subscriber
     _hist_months = [(datetime.strptime(month, "%Y-%m") - timedelta(days=30 * i)).strftime("%Y-%m")
                     for i in range(12)]

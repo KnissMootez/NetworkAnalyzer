@@ -1077,10 +1077,23 @@ def _build_data_profile() -> str:
     MAX_CATS = 30   # max distinct values to list for categorical columns
     lines = ["=== DATA FACTS (auto-queried from live DB at startup — trust these over assumptions) ==="]
 
-    # Tables with millions of rows — sample instead of full scan
+    # Tables with millions of rows — sample instead of full scan.
+    # This list is only a floor: _is_large() below also measures every table, so a
+    # table that grows past the threshold gets sampled without being listed here.
     LARGE_TABLES = frozenset(("kpis_daily", "kpis_hourly", "coverage", "dou_monthly",
                                "ott_monthly", "mobility_profile", "qoe_daily", "billing",
                                "customer_value", "subscriptions", "campaign_targets", "sms_log"))
+    LARGE_ROWS = 100_000   # above this, profile a sample instead of the whole table
+
+    def _is_large(conn, table: str) -> bool:
+        """MAX(rowid) is an O(1) index lookup — cheap enough to ask for every table."""
+        if table.split(".")[-1] in LARGE_TABLES:
+            return True
+        try:
+            n = conn.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()[0]
+            return bool(n and n > LARGE_ROWS)
+        except Exception:
+            return False   # WITHOUT ROWID table — fall back to a full scan
 
     def _profile_table(conn, table: str, label: str):
         """Profile every column of one table."""
@@ -1092,7 +1105,7 @@ def _build_data_profile() -> str:
         if not cols:
             return
         # For large tables use a sampled subquery to keep startup fast
-        is_large = bare in LARGE_TABLES
+        is_large = _is_large(conn, table)
         sample = f"(SELECT * FROM {table} LIMIT 50000)" if is_large else table
 
         all_col_names = [col[1] for col in cols]
@@ -1229,23 +1242,44 @@ def _build_data_profile() -> str:
     print(f"[DataProfile] Built: {len(sc_tables)} SC tables, {len(op_tables)} OP tables, {len(lines)} fact lines")
     return result
 
+_CACHE_HEADER = "# schema="
+
+def _schema_fingerprint() -> str:
+    """Hash both DBs' CREATE statements. Deliberately NOT mtime-based: db_simulator
+    writes on every tick, so any mtime check misses 100% of the time and we rebuild
+    the profile on every boot. The profile describes columns and value ranges, which
+    only move when the schema does."""
+    import hashlib
+    h = hashlib.sha256()
+    for db in (SC_DB, OP_DB):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            for (sql,) in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+            ):
+                h.update(sql.encode("utf-8", "replace"))
+            conn.close()
+        except Exception:
+            h.update(b"<unreadable>")
+    return h.hexdigest()[:16]
+
 def _load_data_profile_cached() -> str:
-    """Return DATA_PROFILE from disk cache if both DBs are unchanged, else rebuild."""
+    """Return DATA_PROFILE from disk cache if the schema is unchanged, else rebuild."""
     cache_path = os.path.join(BASE_DIR, ".data_profile_cache.txt")
+    fp = _schema_fingerprint()
     try:
-        sc_mtime = os.path.getmtime(SC_DB)
-        op_mtime = os.path.getmtime(OP_DB)
-        db_mtime = max(sc_mtime, op_mtime)
-        if os.path.exists(cache_path) and os.path.getmtime(cache_path) >= db_mtime:
-            with open(cache_path, "r", encoding="utf-8") as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            head = f.readline()
+            if head.startswith(_CACHE_HEADER) and head[len(_CACHE_HEADER):].strip() == fp:
                 profile = f.read()
-            print(f"[DataProfile] Loaded from cache ({len(profile.splitlines())} lines)")
-            return profile
+                print(f"[DataProfile] Loaded from cache ({len(profile.splitlines())} lines)")
+                return profile
     except Exception:
         pass
     profile = _build_data_profile()
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(f"{_CACHE_HEADER}{fp}\n")
             f.write(profile)
         print("[DataProfile] Cache written.")
     except Exception:

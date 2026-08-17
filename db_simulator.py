@@ -65,6 +65,34 @@ ALARM_TYPES = [
 SEVERITIES       = ["critical", "major", "minor", "warning"]
 SEVERITY_WEIGHTS = [0.10, 0.25, 0.40, 0.25]
 
+# How an ACTIVE alarm degrades its own cell's KPIs. Multipliers apply to the healthy
+# baseline: <1 shrinks (throughput, availability), >1 grows (drop rate, latency);
+# rsrp_delta is an offset in dBm and sinr is a multiplier. Each fault type degrades
+# what it would actually degrade — a backhaul failure kills throughput and latency,
+# interference wrecks SINR, a power issue takes availability down.
+ALARM_KPI_IMPACT = {
+    "Congestion":        dict(dl=0.45, ul=0.55, drop=2.2, lat=2.4, avail=0.995, sinr=0.75, rsrp_delta=0,   cong="high"),
+    "Backhaul Failure":  dict(dl=0.30, ul=0.35, drop=2.6, lat=3.2, avail=0.970, sinr=0.95, rsrp_delta=0,   cong="high"),
+    "High Interference": dict(dl=0.65, ul=0.70, drop=3.0, lat=1.5, avail=0.990, sinr=0.45, rsrp_delta=-4,  cong="medium"),
+    "Coverage Hole":     dict(dl=0.55, ul=0.60, drop=2.8, lat=1.6, avail=0.985, sinr=0.55, rsrp_delta=-12, cong="medium"),
+    "Hardware Fault":    dict(dl=0.40, ul=0.45, drop=3.5, lat=2.0, avail=0.920, sinr=0.80, rsrp_delta=-3,  cong="medium"),
+    "Power Issue":       dict(dl=0.25, ul=0.30, drop=4.0, lat=2.2, avail=0.850, sinr=0.85, rsrp_delta=-6,  cong="high"),
+}
+# A warning barely moves the needle; a critical one bites at full strength.
+ALARM_SEVERITY_BITE = {"critical": 1.0, "major": 0.6, "minor": 0.3, "warning": 0.15}
+
+# Which customer-facing incident a major/critical alarm provokes. Causes and services
+# are reused verbatim from _INCIDENT_SCENARIOS so the agent's existing filters
+# ("streaming issues", "voice calls") keep matching whichever path created the row.
+ALARM_TO_INCIDENT = {
+    "Congestion":        ("Cell congestion",       "video streaming"),
+    "Backhaul Failure":  ("Backhaul degradation",  "mobile data"),
+    "High Interference": ("Signal interference",   "voice calls"),
+    "Coverage Hole":     ("Signal interference",   "voice calls"),
+    "Hardware Fault":    ("Site outage",           "all services"),
+    "Power Issue":       ("Power failure at site", "all services"),
+}
+
 # Area quality bias for QoE (T=metro best, R=rural worst)
 QOE_BIAS = {"T": 1.10, "N": 1.00, "C": 0.95, "R": 0.70, "S": 0.80}
 
@@ -102,6 +130,16 @@ def op_query(sql, params=()):
             time.sleep(0.5 * (attempt + 1))
     return []
 
+def _is_retryable(err):
+    """A locked/busy DB is worth retrying; a malformed statement is not — it fails
+    identically on all three attempts and then vanishes. That is exactly how
+    simulate_kpi_fluctuation ran for months reporting success while writing nothing:
+    its ON CONFLICT target had no matching UNIQUE constraint, and the error was
+    swallowed here. Real SQL errors now get printed."""
+    msg = str(err).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def sc_write(sql, params=()):
     for attempt in range(3):
         try:
@@ -110,7 +148,10 @@ def sc_write(sql, params=()):
             conn.commit()
             conn.close()
             return True
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            if not _is_retryable(e):
+                print(f"  [SQL ERROR] {e} :: {' '.join(sql.split())[:90]}")
+                return False
             time.sleep(0.5 * (attempt + 1))
     return False
 
@@ -122,7 +163,10 @@ def op_write(sql, params=()):
             conn.commit()
             conn.close()
             return True
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            if not _is_retryable(e):
+                print(f"  [SQL ERROR] {e} :: {' '.join(sql.split())[:90]}")
+                return False
             time.sleep(0.5 * (attempt + 1))
     return False
 
@@ -137,7 +181,10 @@ def sc_write_many(sql, rows, batch_size=5000):
                 conn.commit()
                 conn.close()
                 break
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as e:
+                if not _is_retryable(e):
+                    print(f"  [SQL ERROR] {e} :: {' '.join(sql.split())[:90]}")
+                    break
                 time.sleep(0.5 * (attempt + 1))
 
 def op_write_many(sql, rows, batch_size=5000):
@@ -150,7 +197,10 @@ def op_write_many(sql, rows, batch_size=5000):
                 conn.commit()
                 conn.close()
                 break
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as e:
+                if not _is_retryable(e):
+                    print(f"  [SQL ERROR] {e} :: {' '.join(sql.split())[:90]}")
+                    break
                 time.sleep(0.5 * (attempt + 1))
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -164,7 +214,11 @@ TECH_BASE = {
     "5G": dict(rsrp=-78, sinr=22, dl=180, ul=45,  drop=0.3, avail=99.8, lat=12),
 }
 
-def _gen_kpi(cell_id, technology, date_str):
+def _gen_kpi(cell_id, technology, date_str, alarm=None):
+    """Generate one cell-day of KPIs. `alarm` is an (alarm_type, severity) tuple for an
+    ACTIVE alarm on this cell; when present the fault is the cause of the numbers rather
+    than an unrelated row in another table, so a cell carrying a critical Power Issue
+    actually reads as broken."""
     base = TECH_BASE.get(technology, dict(rsrp=-88, sinr=13, dl=30, ul=8, drop=0.8, avail=99.2, lat=50))
     congestion_spike = random.random() < 0.08
     fault_event      = random.random() < 0.03
@@ -174,15 +228,110 @@ def _gen_kpi(cell_id, technology, date_str):
     avail = base["avail"] * random.uniform(0.95 if fault_event else 0.999, 1.0)
     lat  = base["lat"]  * random.uniform(1.0, 2.2 if congestion_spike else 1.1)
     cong = "high" if congestion_spike else ("medium" if dl < base["dl"] * 0.75 else "low")
+    rsrp = base["rsrp"] + random.gauss(0, 3)
+    sinr = base["sinr"] + random.gauss(0, 2)
+
+    impact = ALARM_KPI_IMPACT.get(alarm[0]) if alarm else None
+    if impact:
+        # Blend toward the fault's full impact by severity: 1 + (mult-1)*bite.
+        bite = ALARM_SEVERITY_BITE.get(alarm[1], 0.3)
+        scale = lambda key: 1 + (impact[key] - 1) * bite
+        dl    *= scale("dl")
+        ul    *= scale("ul")
+        drop  *= scale("drop")
+        lat   *= scale("lat")
+        avail *= scale("avail")
+        sinr  *= scale("sinr")
+        rsrp  += impact["rsrp_delta"] * bite
+        if bite >= 0.5:                      # major/critical dominate the congestion label
+            cong = impact["cong"]
+
     return (
         cell_id, date_str,
-        round(base["rsrp"] + random.gauss(0, 3), 2),
-        round(base["sinr"] + random.gauss(0, 2), 2),
-        round(dl, 2), round(ul, 2),
-        round(drop, 3), round(avail, 3),
+        round(rsrp, 2),
+        round(sinr, 2),
+        round(max(dl, 0.05), 2), round(max(ul, 0.02), 2),
+        round(min(drop, 100.0), 3), round(max(min(avail, 100.0), 0.0), 3),
         round(lat, 1), cong,
         random.randint(10, 120)
     )
+
+
+_KPI_UPSERT = """
+    INSERT INTO kpis_daily
+        (cell_id, date, rsrp_avg, sinr_avg, dl_throughput_mbps,
+         ul_throughput_mbps, dropped_call_rate, availability_pct,
+         latency_ms, congestion_level, active_users_avg)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(cell_id, date) DO UPDATE SET
+        rsrp_avg=excluded.rsrp_avg, sinr_avg=excluded.sinr_avg,
+        dl_throughput_mbps=excluded.dl_throughput_mbps,
+        ul_throughput_mbps=excluded.ul_throughput_mbps,
+        dropped_call_rate=excluded.dropped_call_rate,
+        availability_pct=excluded.availability_pct,
+        latency_ms=excluded.latency_ms,
+        congestion_level=excluded.congestion_level,
+        active_users_avg=excluded.active_users_avg
+"""
+
+_TCA_FALLBACK_BASE = dict(rsrp=-88, sinr=13, dl=30, ul=8, drop=0.8, avail=99.2, lat=50)
+
+def _detect_threshold_alarm(technology, row):
+    """The REVERSE coupling: read a degraded cell-day and decide which alarm it should
+    raise. Equipment faults (power, hardware, backhaul) announce themselves and then
+    degrade the cell — that is simulate_alarm_trigger. Performance faults have no
+    equipment to raise a flag; they are DETECTED by watching counters cross a threshold,
+    which is what a real NMS calls a threshold-crossing alert.
+
+    Every threshold is RELATIVE to the technology baseline, never absolute: a 1.9% drop
+    rate is a broken 5G cell and a completely ordinary 2G one. Checks run worst-first and
+    return at most one alarm, so a badly degraded cell raises the fault that explains it
+    rather than one of each. Returns (alarm_type, severity) or None."""
+    base = TECH_BASE.get(technology, _TCA_FALLBACK_BASE)
+    _cid, _date, rsrp, sinr, dl, _ul, _drop, avail, lat, cong, _users = row
+
+    def sev(excess):
+        """How far past the threshold, as a ratio — 45% over is critical."""
+        return "critical" if excess >= 0.45 else ("major" if excess >= 0.25 else "minor")
+
+    # Order matters, and it is SIGNATURE-FIRST, not severity-first. Every fault dents
+    # availability a little, so checking availability early misattributes almost
+    # everything as a power issue. Each metric below is checked by the fault that owns
+    # it: only a coverage hole moves RSRP that far, only interference collapses SINR
+    # while RSRP holds, only a backhaul problem triples latency, and only an equipment
+    # failure takes real availability out.
+    if rsrp < base["rsrp"] - 10:
+        return "Coverage Hole", sev((base["rsrp"] - 10 - rsrp) / 8)
+    if sinr < base["sinr"] * 0.55:
+        return "High Interference", sev(1 - sinr / (base["sinr"] * 0.55))
+    # 3.0x, not 2.5x: congestion itself pushes latency to ~2.4x, so a tighter bar here
+    # relabels every congested cell as a transport fault.
+    if lat > base["lat"] * 3.0:
+        return "Backhaul Failure", sev(lat / (base["lat"] * 3.0) - 1)
+    if avail < base["avail"] * 0.90:
+        return "Power Issue", sev((base["avail"] * 0.90 - avail) / 6)
+    if avail < base["avail"] * 0.95:
+        return "Hardware Fault", sev((base["avail"] * 0.95 - avail) / 6)
+    if dl < base["dl"] * 0.55:
+        return "Congestion", sev(1 - dl / (base["dl"] * 0.55))
+    if cong == "high":
+        return "Congestion", "minor"
+    return None
+
+
+def _active_alarms_by_cell(cell_ids=None):
+    """{cell_id: (alarm_type, severity)} for active alarms, worst severity per cell."""
+    sql = ("SELECT cell_id, alarm_type, severity FROM network_alarms WHERE is_active=1")
+    params = ()
+    if cell_ids:
+        sql += f" AND cell_id IN ({','.join('?' * len(cell_ids))})"
+        params = tuple(cell_ids)
+    rank = {"critical": 3, "major": 2, "minor": 1, "warning": 0}
+    worst = {}
+    for cid, atype, sev in sc_query(sql, params):
+        if cid not in worst or rank.get(sev, 0) > rank.get(worst[cid][1], 0):
+            worst[cid] = (atype, sev)
+    return worst
 
 QOE_APP_PROFILES = {
     # app_type: (base_score, base_latency_ms, base_throughput_mbps)
@@ -352,7 +501,8 @@ def backfill_monthly_op():
                 cv_rows.append((msisdn, m, arpu, seg, hvc))
     if cv_rows:
         print(f"  [BACKFILL] customer_value: inserting {len(cv_rows):,} rows …")
-        op_write_many("INSERT OR IGNORE INTO customer_value VALUES(?,?,?,?,?)", cv_rows)
+        op_write_many("INSERT OR IGNORE INTO customer_value "
+                      "(msisdn, month, arpu, value_segment, is_hvc) VALUES(?,?,?,?,?)", cv_rows)
 
     # ── billing ──────────────────────────────────────────────────────────
     existing_bill = {(r[0], r[1]) for r in op_query("SELECT msisdn, billing_month FROM billing")}
@@ -550,6 +700,16 @@ def _ensure_new_tables():
         sc.execute("ALTER TABLE experience_incidents ADD COLUMN cell_id TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+    # kpis_daily was created without a UNIQUE constraint on (cell_id, date), so every
+    # "INSERT ... ON CONFLICT(cell_id, date) DO UPDATE" in the live loop failed to
+    # prepare and was swallowed by the retry helpers — simulate_kpi_fluctuation reported
+    # updated cells for months while writing nothing. The index makes the upserts work.
+    try:
+        sc.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kpi_cell_date ON kpis_daily(cell_id, date)")
+    except sqlite3.OperationalError as e:
+        print(f"  [INIT] could not create idx_kpi_cell_date ({e}) — "
+              f"duplicate (cell_id, date) rows must be removed first")
     sc.commit()
     sc.close()
 
@@ -947,10 +1107,12 @@ def ensure_current_month(verbose=False):
     month = datetime.now().strftime("%Y-%m")
 
     # dou_monthly
+    # No small LIMIT here: at 500 per call every 10 ticks a fresh month took ~100 ticks
+    # to fill, and for four months it never caught up at all. One pass, whole month.
     missing_dou = sc_query("""
         SELECT msisdn FROM subscribers WHERE is_active=1
         AND msisdn NOT IN (SELECT msisdn FROM dou_monthly WHERE month=?)
-        LIMIT 500
+        LIMIT 60000
     """, (month,))
     if missing_dou:
         rows = [(m[0], month, 0.0, 0, None, 0) for m in missing_dou]
@@ -961,7 +1123,7 @@ def ensure_current_month(verbose=False):
     missing_cv = op_query("""
         SELECT msisdn FROM customers WHERE is_active=1
         AND msisdn NOT IN (SELECT msisdn FROM customer_value WHERE month=?)
-        LIMIT 500
+        LIMIT 60000
     """, (month,))
     if missing_cv:
         cv_rows = []
@@ -980,7 +1142,8 @@ def ensure_current_month(verbose=False):
                 elif arpu >= 25: seg = "silver";   hvc = 0
                 else:            seg = "bronze";   hvc = 0
             cv_rows.append((msisdn, month, arpu, seg, hvc))
-        op_write_many("INSERT OR IGNORE INTO customer_value VALUES(?,?,?,?,?)", cv_rows)
+        op_write_many("INSERT OR IGNORE INTO customer_value "
+                      "(msisdn, month, arpu, value_segment, is_hvc) VALUES(?,?,?,?,?)", cv_rows)
         if verbose: print(f"  [INIT] Created {len(cv_rows)} customer_value records for {month}")
 
 
@@ -989,31 +1152,32 @@ def ensure_current_month(verbose=False):
 # ═══════════════════════════════════════════════════════════════════════
 
 def simulate_kpi_fluctuation(verbose=False):
-    """Update KPIs for random cells — writes today's row."""
+    """Update KPIs for random cells — writes today's row. Every cell currently carrying
+    an active alarm is refreshed too, so a fault keeps showing in the numbers for as long
+    as it is open instead of drifting back to healthy on the next random redraw."""
     cells = sc_query(
         "SELECT cell_id, technology FROM cells WHERE is_active=1 ORDER BY RANDOM() LIMIT ?",
         (KPI_CELLS_PER_TICK,)
     )
-    today = datetime.now().strftime("%Y-%m-%d")
-    rows  = [_gen_kpi(cid, tech, today) for cid, tech in cells]
-    for row in rows:
-        sc_write("""
-            INSERT INTO kpis_daily
-                (cell_id, date, rsrp_avg, sinr_avg, dl_throughput_mbps,
-                 ul_throughput_mbps, dropped_call_rate, availability_pct,
-                 latency_ms, congestion_level, active_users_avg)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(cell_id, date) DO UPDATE SET
-                rsrp_avg=excluded.rsrp_avg, sinr_avg=excluded.sinr_avg,
-                dl_throughput_mbps=excluded.dl_throughput_mbps,
-                ul_throughput_mbps=excluded.ul_throughput_mbps,
-                dropped_call_rate=excluded.dropped_call_rate,
-                availability_pct=excluded.availability_pct,
-                latency_ms=excluded.latency_ms,
-                congestion_level=excluded.congestion_level,
-                active_users_avg=excluded.active_users_avg
-        """, row)
-    if verbose: print(f"  [KPI] Updated {len(rows)} cells")
+    alarmed = sc_query("""
+        SELECT DISTINCT c.cell_id, c.technology FROM cells c
+        JOIN network_alarms na ON na.cell_id=c.cell_id
+        WHERE na.is_active=1 AND c.is_active=1
+        ORDER BY RANDOM() LIMIT ?
+    """, (KPI_CELLS_PER_TICK,))
+    seen = set()
+    todo = []
+    for cid, tech in list(cells) + list(alarmed):
+        if cid not in seen:
+            seen.add(cid)
+            todo.append((cid, tech))
+
+    today  = datetime.now().strftime("%Y-%m-%d")
+    alarms = _active_alarms_by_cell([cid for cid, _ in todo])
+    for cid, tech in todo:
+        sc_write(_KPI_UPSERT, _gen_kpi(cid, tech, today, alarm=alarms.get(cid)))
+    if verbose:
+        print(f"  [KPI] Updated {len(todo)} cells ({len(alarms)} degraded by an active alarm)")
 
 
 def simulate_qoe_update(verbose=False):
@@ -1313,6 +1477,57 @@ def _subscriber_snapshot(msisdns):
     return {k: tuple(v) for k, v in out.items()}
 
 
+def _emit_incident_event(targets, cause, service, severity, now, scope="cell"):
+    """Write ONE incident event: an incident row per affected subscriber plus the coherent
+    evidence trail — poor qoe_daily rows for the affected apps, a service interruption, and
+    a complaint from some of them. All writes batched. Returns (targets, dur_min, info);
+    the caller re-scores churn so it can batch that across several events."""
+    if not targets:
+        return [], 0, {}
+    today   = now.strftime("%Y-%m-%d")
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    lo, hi  = _INCIDENT_DURATION_MIN[severity]
+    dur_min = random.randint(lo, hi)
+    eta     = (now + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
+    info    = _subscriber_snapshot(targets)
+    apps    = _SERVICE_APPS.get(service, ("video",))
+    # a single customer's own fault gets their attention; a mass outage doesn't
+    # generate 120 complaints
+    compl_rate = 0.7 if (scope == "subscriber" and severity in ("major", "critical")) \
+                     else (0.3 if scope == "subscriber" else _COMPLAINT_RATE_BULK)
+
+    inc_rows, qoe_rows, si_rows, comp_rows = [], [], [], []
+    for m in targets:
+        region, cell_id, segment, is_hvc = info.get(m, (None, None, None, 0))
+        inc_rows.append((m, segment, is_hvc, region, service, cause, severity,
+                         now_str, eta, dur_min, cell_id))
+        for app in apps:
+            qoe_rows.append((m, today, app, random.randint(150, 260),
+                             round(random.uniform(0.5, 2.5), 2),
+                             round(random.uniform(1.2, 2.2), 2), "poor"))
+        si_rows.append((m, today, dur_min, cause, service))
+        if random.random() < compl_rate:
+            comp_rows.append((m, today, service, f"{cause} affecting {service}"))
+
+    sc_write_many("""INSERT INTO experience_incidents
+                     (msisdn, value_segment, is_hvc, region, affected_service, root_cause,
+                      severity, started_at, expected_resolution_at, status, duration_min, cell_id)
+                     VALUES(?,?,?,?,?,?,?,?,?, 'active', ?,?)""", inc_rows)
+    sc_write_many("""INSERT INTO qoe_daily VALUES(?,?,?,?,?,?,?)
+                     ON CONFLICT(msisdn, date, app_type) DO UPDATE SET
+                         avg_latency_ms=excluded.avg_latency_ms,
+                         avg_throughput_mbps=excluded.avg_throughput_mbps,
+                         experience_score=excluded.experience_score,
+                         experience_label=excluded.experience_label""", qoe_rows)
+    op_write_many("""INSERT INTO service_interruptions
+                     (msisdn, date, duration_min, cause, affected_service)
+                     VALUES(?,?,?,?,?)""", si_rows)
+    if comp_rows:
+        sc_write_many("""INSERT INTO complaints (msisdn, date, category, description, status)
+                         VALUES(?,?,?,?, 'open')""", comp_rows)
+    return targets, dur_min, info
+
+
 def simulate_experience_incident(verbose=False):
     """OPEN coherent, timestamped service-degradation EVENTS.
 
@@ -1325,7 +1540,6 @@ def simulate_experience_incident(verbose=False):
     open. simulate_incident_resolution() heals it later and relaxes churn. All writes
     are batched: a site outage is ~120 subscribers, not 120 connections."""
     now     = datetime.now()
-    today   = now.strftime("%Y-%m-%d")
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     active_now = {r[0] for r in sc_query(
         "SELECT msisdn FROM experience_incidents WHERE status='active'")}
@@ -1340,47 +1554,9 @@ def simulate_experience_incident(verbose=False):
         if not targets:
             continue
 
-        lo, hi  = _INCIDENT_DURATION_MIN[severity]
-        dur_min = random.randint(lo, hi)
-        eta     = (now + timedelta(minutes=dur_min)).strftime("%Y-%m-%d %H:%M:%S")
-        info    = _subscriber_snapshot(targets)
-        apps    = _SERVICE_APPS.get(service, ("video",))
-        # a single customer's own fault gets their attention; a mass outage doesn't
-        # generate 120 complaints
-        compl_rate = 0.7 if (scope == "subscriber" and severity in ("major", "critical")) \
-                         else (0.3 if scope == "subscriber" else _COMPLAINT_RATE_BULK)
-
-        inc_rows, qoe_rows, si_rows, comp_rows = [], [], [], []
-        for m in targets:
-            region, cell_id, segment, is_hvc = info.get(m, (None, None, None, 0))
-            inc_rows.append((m, segment, is_hvc, region, service, cause, severity,
-                             now_str, eta, dur_min, cell_id))
-            for app in apps:
-                qoe_rows.append((m, today, app, random.randint(150, 260),
-                                 round(random.uniform(0.5, 2.5), 2),
-                                 round(random.uniform(1.2, 2.2), 2), "poor"))
-            si_rows.append((m, today, dur_min, cause, service))
-            if random.random() < compl_rate:
-                comp_rows.append((m, today, service, f"{cause} affecting {service}"))
-            active_now.add(m)
-
-        sc_write_many("""INSERT INTO experience_incidents
-                         (msisdn, value_segment, is_hvc, region, affected_service, root_cause,
-                          severity, started_at, expected_resolution_at, status, duration_min, cell_id)
-                         VALUES(?,?,?,?,?,?,?,?,?, 'active', ?,?)""", inc_rows)
-        sc_write_many("""INSERT INTO qoe_daily VALUES(?,?,?,?,?,?,?)
-                         ON CONFLICT(msisdn, date, app_type) DO UPDATE SET
-                             avg_latency_ms=excluded.avg_latency_ms,
-                             avg_throughput_mbps=excluded.avg_throughput_mbps,
-                             experience_score=excluded.experience_score,
-                             experience_label=excluded.experience_label""", qoe_rows)
-        op_write_many("""INSERT INTO service_interruptions
-                         (msisdn, date, duration_min, cause, affected_service)
-                         VALUES(?,?,?,?,?)""", si_rows)
-        if comp_rows:
-            sc_write_many("""INSERT INTO complaints (msisdn, date, category, description, status)
-                             VALUES(?,?,?,?, 'open')""", comp_rows)
-
+        targets, dur_min, info = _emit_incident_event(targets, cause, service, severity,
+                                                      now, scope)
+        active_now.update(targets)
         all_affected.extend(targets)
         if verbose:
             hvc_n = sum(1 for m in targets if info.get(m, (None, None, None, 0))[3])
@@ -1484,35 +1660,162 @@ def simulate_voice_update(verbose=False):
 
 
 def simulate_alarm_trigger(verbose=False):
+    """Raise an alarm and make it MEAN something: degrade the cell it sits on, and for
+    major/critical faults open experience incidents for the customers that cell serves.
+
+    The cell is seeded through an active subscriber rather than picked at random from the
+    cells table — the same reasoning as _incident_targets: most cells serve nobody, so a
+    randomly placed alarm is decoration that never reaches a customer."""
     if random.random() > P_ALARM_TRIGGER:
         return
-    cells = sc_query("SELECT cell_id FROM cells WHERE is_active=1 ORDER BY RANDOM() LIMIT 3")
-    if not cells:
+    seed = sc_query("""
+        SELECT st.current_cell_id, c.technology
+        FROM subscriber_technology st
+        JOIN subscribers s ON st.msisdn=s.msisdn
+        JOIN cells c ON st.current_cell_id=c.cell_id
+        WHERE s.is_active=1 AND c.is_active=1
+        ORDER BY RANDOM() LIMIT 1
+    """)
+    if not seed:
         return
-    cell_id  = cells[0][0]
+    cell_id, technology = seed[0]
     atype    = random.choice(ALARM_TYPES)
     severity = random.choices(SEVERITIES, weights=SEVERITY_WEIGHTS)[0]
-    now      = datetime.now().isoformat()
+    now      = datetime.now()
+    now_iso  = now.isoformat()
     sc_write("""
         INSERT INTO network_alarms
             (cell_id, alarm_type, severity, trigger_time, is_active, description)
         VALUES (?,?,?,?,1,?)
-    """, (cell_id, atype, severity, now, f"{atype} on cell {cell_id} at {now[:16]}"))
-    if verbose: print(f"  [ALARM] {severity.upper()} — {atype} on cell {cell_id}")
+    """, (cell_id, atype, severity, now_iso, f"{atype} on cell {cell_id} at {now_iso[:16]}"))
+
+    # The fault is the CAUSE of the cell's numbers, not a sibling row in another table.
+    sc_write(_KPI_UPSERT, _gen_kpi(cell_id, technology, now.strftime("%Y-%m-%d"),
+                                   alarm=(atype, severity)))
+
+    # Minor/warning faults stay a network-side concern; major and critical ones reach
+    # the customers on that cell and flow through to complaints and churn.
+    affected = []
+    if severity in ("critical", "major"):
+        cause, service = ALARM_TO_INCIDENT.get(atype, ("Signal interference", "voice calls"))
+        active_now = {r[0] for r in sc_query(
+            "SELECT msisdn FROM experience_incidents WHERE status='active'")}
+        targets = [m for (m,) in sc_query("""
+            SELECT st.msisdn FROM subscriber_technology st
+            JOIN subscribers s ON st.msisdn=s.msisdn
+            WHERE st.current_cell_id=? AND s.is_active=1 LIMIT ?
+        """, (cell_id, _MAX_AFFECTED_PER_EVENT)) if m not in active_now]
+        affected, _dur, _info = _emit_incident_event(targets, cause, service, severity, now)
+        if _churn_model and affected:
+            oc = sqlite3.connect(OP_DB); sc = sqlite3.connect(SC_DB)
+            _rescore_churn(affected, now.strftime("%Y-%m"), oc, sc)
+            oc.close(); sc.close()
+
+    if verbose:
+        tail = f", hit {len(affected)} subscriber(s)" if affected else ""
+        print(f"  [ALARM] {severity.upper()} — {atype} on cell {cell_id}{tail}")
+
+
+_MAX_TCA_PER_TICK = 3
+
+def simulate_kpi_threshold_alarms(verbose=False):
+    """Raise alarms FROM degraded counters — the reverse of simulate_alarm_trigger.
+
+    Two guards keep this from turning into a siren. Cells that already carry an active
+    alarm are skipped, so an alarm-induced degradation cannot spawn a second alarm about
+    itself (no feedback loop, no duplicate per fault). And only cells that actually serve
+    subscribers are eligible — alarming an empty cell would put back exactly the phantom
+    rows this coupling exists to remove."""
+    today = datetime.now()
+    day   = today.strftime("%Y-%m-%d")
+    rows  = sc_query("""
+        SELECT k.cell_id, k.date, k.rsrp_avg, k.sinr_avg, k.dl_throughput_mbps,
+               k.ul_throughput_mbps, k.dropped_call_rate, k.availability_pct,
+               k.latency_ms, k.congestion_level, k.active_users_avg, c.technology
+        FROM kpis_daily k
+        JOIN cells c ON k.cell_id = c.cell_id
+        WHERE k.date = ? AND c.is_active = 1
+          AND k.cell_id NOT IN (SELECT cell_id FROM network_alarms WHERE is_active=1)
+          AND EXISTS (SELECT 1 FROM subscriber_technology st
+                      JOIN subscribers s ON st.msisdn = s.msisdn
+                      WHERE st.current_cell_id = k.cell_id AND s.is_active = 1)
+        ORDER BY RANDOM() LIMIT 200
+    """, (day,))
+
+    raised = []
+    for row in rows:
+        hit = _detect_threshold_alarm(row[11], row[:11])
+        if hit:
+            raised.append((row[0], hit[0], hit[1]))
+        if len(raised) >= _MAX_TCA_PER_TICK:
+            break
+    if not raised:
+        return
+
+    now_iso = today.isoformat()
+    sc_write_many("""
+        INSERT INTO network_alarms
+            (cell_id, alarm_type, severity, trigger_time, is_active, description)
+        VALUES (?,?,?,?,1,?)
+    """, [(cid, atype, sev, now_iso,
+           f"{atype} detected on cell {cid} by threshold crossing at {now_iso[:16]}")
+          for cid, atype, sev in raised])
+
+    # a detected fault reaches customers exactly like a raised one does
+    affected = []
+    active_now = {r[0] for r in sc_query(
+        "SELECT msisdn FROM experience_incidents WHERE status='active'")}
+    for cid, atype, sev in raised:
+        if sev not in ("critical", "major"):
+            continue
+        cause, service = ALARM_TO_INCIDENT.get(atype, ("Signal interference", "voice calls"))
+        targets = [m for (m,) in sc_query("""
+            SELECT st.msisdn FROM subscriber_technology st
+            JOIN subscribers s ON st.msisdn=s.msisdn
+            WHERE st.current_cell_id=? AND s.is_active=1 LIMIT ?
+        """, (cid, _MAX_AFFECTED_PER_EVENT)) if m not in active_now]
+        hit, _dur, _info = _emit_incident_event(targets, cause, service, sev, today)
+        active_now.update(hit)
+        affected.extend(hit)
+
+    if _churn_model and affected:
+        oc = sqlite3.connect(OP_DB); sc = sqlite3.connect(SC_DB)
+        _rescore_churn(list(set(affected)), today.strftime("%Y-%m"), oc, sc)
+        oc.close(); sc.close()
+
+    if verbose:
+        for cid, atype, sev in raised:
+            print(f"  [TCA] {sev.upper()} — {atype} detected on cell {cid} from KPI thresholds")
 
 
 def simulate_alarm_clear(verbose=False):
+    """Clear alarms and let the cell recover — the KPI row is rewritten without the fault
+    (or with whatever weaker alarm is still open), so healing shows up in the numbers."""
     if random.random() > P_ALARM_CLEAR:
         return
-    alarms  = sc_query("SELECT alarm_id, severity FROM network_alarms WHERE is_active=1 ORDER BY RANDOM() LIMIT 5")
-    cleared = 0
-    now     = datetime.now().isoformat()
-    for alarm_id, severity in alarms:
+    alarms  = sc_query("""
+        SELECT na.alarm_id, na.severity, na.cell_id, c.technology
+        FROM network_alarms na JOIN cells c ON na.cell_id=c.cell_id
+        WHERE na.is_active=1 ORDER BY RANDOM() LIMIT 5
+    """)
+    cleared = []
+    now     = datetime.now()
+    now_iso = now.isoformat()
+    for alarm_id, severity, cell_id, technology in alarms:
         prob = {"warning": 0.5, "minor": 0.3, "major": 0.1, "critical": 0.02}.get(severity, 0.2)
         if random.random() < prob:
-            sc_write("UPDATE network_alarms SET is_active=0, clear_time=? WHERE alarm_id=?", (now, alarm_id))
-            cleared += 1
-    if verbose and cleared: print(f"  [ALARM] Cleared {cleared} alarms")
+            sc_write("UPDATE network_alarms SET is_active=0, clear_time=? WHERE alarm_id=?", (now_iso, alarm_id))
+            cleared.append((cell_id, technology))
+
+    # recompute each healed cell against whatever alarms remain open on it
+    if cleared:
+        remaining = _active_alarms_by_cell([cid for cid, _ in cleared])
+        today = now.strftime("%Y-%m-%d")
+        for cell_id, technology in cleared:
+            sc_write(_KPI_UPSERT, _gen_kpi(cell_id, technology, today,
+                                           alarm=remaining.get(cell_id)))
+    if verbose and cleared:
+        print(f"  [ALARM] Cleared {len(cleared)} alarms (cells recovered)")
 
 
 def simulate_technology_migration(verbose=False):
@@ -1790,7 +2093,8 @@ def _insert_new_subscriber(verbose=False):
     # Insert current month + 11 historical months so backfill never sees gaps for this subscriber
     _hist_months = [(datetime.strptime(month, "%Y-%m") - timedelta(days=30 * i)).strftime("%Y-%m")
                     for i in range(12)]
-    op_write_many("INSERT OR IGNORE INTO customer_value VALUES (?,?,?,?,?)",
+    op_write_many("INSERT OR IGNORE INTO customer_value "
+                  "(msisdn, month, arpu, value_segment, is_hvc) VALUES (?,?,?,?,?)",
                   [(msisdn, m, round(arpu * random.uniform(0.85, 1.15), 2), vseg, hvc)
                    for m in _hist_months])
 
@@ -1999,7 +2303,8 @@ def main():
 
             # Every tick
             simulate_kpi_fluctuation(args.verbose)
-            simulate_alarm_trigger(args.verbose)
+            simulate_alarm_trigger(args.verbose)        # equipment fault -> degrades its cell
+            simulate_kpi_threshold_alarms(args.verbose) # degraded counters -> raise the alarm
             simulate_alarm_clear(args.verbose)
             simulate_incident_resolution(args.verbose)   # self-heal any due experience incidents
 

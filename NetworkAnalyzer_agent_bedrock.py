@@ -3619,6 +3619,30 @@ _CONVERSATIONAL_PATTERNS = [
     "never mind", "nevermind", "forget it", "ignore that",
 ]
 
+def _build_domain_terms() -> frozenset:
+    """Every table and column name in both DBs, plus the metric words people actually
+    type. Used to tell a short QUESTION from a short REMARK."""
+    terms = set()
+    for line in LIVE_SCHEMA.splitlines():
+        if ":" not in line:
+            continue
+        tbl, cols = line.split(":", 1)
+        terms.add(tbl.strip().lower().replace("op.", ""))
+        terms.update(c.strip().lower() for c in cols.split(","))
+    terms |= {"arpu", "nps", "churn", "hvc", "hvcs", "5g", "4g", "3g", "2g", "volte",
+              "fwa", "roaming", "revenue", "usage", "alarm", "alarms", "incident",
+              "incidents", "complaint", "complaints", "subscriber", "subscribers",
+              "customer", "customers", "cell", "cells", "site", "sites", "coverage",
+              "segment", "segments", "platinum", "gold", "silver", "bronze", "upsell",
+              "latency", "throughput", "drop", "signal", "qoe", "billing", "trend"}
+    for t in list(terms):                      # split snake_case into parts
+        terms.update(t.split("_"))
+    return frozenset(t for t in terms if len(t) > 1)
+
+
+_DOMAIN_TERMS = _build_domain_terms()
+
+
 def _is_conversational(text: str, has_prior_context: bool) -> bool:
     """Returns True if the message is a correction, opinion, or clarification that
     doesn't need new SQL — it should be answered from existing context."""
@@ -3627,13 +3651,21 @@ def _is_conversational(text: str, has_prior_context: bool) -> bool:
     t = text.lower().strip()
     if any(p in t for p in _CONVERSATIONAL_PATTERNS):
         return True
-    # Very short messages with prior context are likely follow-ups, not new queries
-    words = t.split()
-    if len(words) <= 6 and not any(w in t for w in [
-        "show", "list", "count", "how many", "what is", "what are", "give me",
-        "average", "total", "compare", "find", "get", "query", "kpi", "top",
-    ]):
-        return True
+    # Very short messages with prior context are likely follow-ups, not new queries.
+    # But short does NOT mean conversational: "ARPU trend last 6 months" is five words
+    # and unmistakably a query. It used to be routed to "answer from context", which
+    # replayed the PREVIOUS answer verbatim without running any SQL. So a short message
+    # that names anything in the schema is treated as a question; only one that names
+    # nothing ("why?", "really", "and then") is a remark.
+    words = [w.strip("?!.,;:'\"") for w in t.split()]
+    if len(words) <= 6:
+        if any(w in _DOMAIN_TERMS for w in words):
+            return False
+        if not any(w in t for w in [
+            "show", "list", "count", "how many", "what is", "what are", "give me",
+            "average", "total", "compare", "find", "get", "query", "kpi", "top",
+        ]):
+            return True
     return False
 
 def _classify_intent(user_input: str, mem_ctx: str) -> str:

@@ -365,10 +365,19 @@ async def ws_chat(websocket: WebSocket, model: str = "qwen3"):
             except Exception:
                 return
 
+    # Questions typed while a run is in flight land here instead of being dropped.
+    # The mid-run listener below exists to catch "stop", and it used to discard every
+    # other message it saw — so anything you typed while the agent was thinking was
+    # silently lost, and the UI paired the previous run's answer with your new bubble.
+    pending_msgs: list = []
+
     try:
         while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            if pending_msgs:
+                msg = pending_msgs.pop(0)
+            else:
+                raw = await websocket.receive_text()
+                msg = json.loads(raw)
             if msg.get("type") == "pong":
                 continue
             if msg.get("type") == "stop":
@@ -421,14 +430,27 @@ async def ws_chat(websocket: WebSocket, model: str = "qwen3"):
                             in_msg = json.loads(recv_task.result())
                             if in_msg.get("type") == "stop" and stop_ev:
                                 stop_ev.set()
-                            # ignore pong / unknown during streaming
+                            elif in_msg.get("type") != "pong":
+                                # A real message (usually a question typed ahead).
+                                # Queue it for the next iteration rather than dropping
+                                # it — the agent is single-flight, not deaf.
+                                pending_msgs.append(in_msg)
                         except Exception:
                             pass
                         if not drain_task.done():
                             recv_task = asyncio.ensure_future(websocket.receive_text())
 
-                # Cancel the pending recv_task if drain finished first
-                if not recv_task.done():
+                # Drain or cancel the listener. If it completed in the same breath as
+                # the agent finishing, its message is real input and must not be lost
+                # just because the race went the other way.
+                if recv_task.done():
+                    try:
+                        last = json.loads(recv_task.result())
+                        if last.get("type") not in ("pong", "stop"):
+                            pending_msgs.append(last)
+                    except Exception:
+                        pass
+                else:
                     recv_task.cancel()
                     try:
                         await recv_task

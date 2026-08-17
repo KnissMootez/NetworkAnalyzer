@@ -72,6 +72,38 @@ def reclassify_segments(dry_run=False):
           f"({100.0*hvc_now/total:.1f}%)" if total else "  nothing to do")
 
 
+def regenerate_nps(dry_run=False):
+    """Rebuild every nps_scores row from THAT MONTH's segment, with the skewed
+    within-band score distribution.
+
+    Why: _gen_nps derives sentiment from value_segment, and the segment thresholds were
+    recalibrated (platinum went from 67.6% of the base to the top 10%). Months generated
+    before that used the old mix, months after used the new one, which put a cliff in the
+    series at the boundary — promoters dropped 5,092 -> 3,705 between April and May with
+    nothing in the fictional world causing it. Any NPS trend question narrated that as
+    'growing customer dissatisfaction'.
+
+    Respondents stay exactly who they were; only their score is redrawn. Seeded per
+    (msisdn, month) so this is reproducible and re-running changes nothing."""
+    months = [r[0] for r in S.op_query("SELECT DISTINCT month FROM nps_scores ORDER BY 1")]
+    print(f"  {len(months)} months to regenerate")
+    total = 0
+    for month in months:
+        seg = dict(S.op_query(
+            "SELECT msisdn, value_segment FROM customer_value WHERE month=?", (month,)))
+        respondents = S.op_query("SELECT msisdn FROM nps_scores WHERE month=?", (month,))
+        updates = []
+        for (msisdn,) in respondents:
+            rng = random.Random(f"{msisdn}|{month}")
+            _, _, score, cat = S._gen_nps(msisdn, month, seg.get(msisdn, "bronze"), rng=rng)
+            updates.append((score, cat, msisdn, month))
+        total += len(updates)
+        if updates and not dry_run:
+            S.op_write_many("UPDATE nps_scores SET nps_score=?, nps_category=? "
+                            "WHERE msisdn=? AND month=?", updates)
+    print(f"  {total:,} rows regenerated")
+
+
 def fill_customer_value_gap(dry_run=False):
     """Carry each customer's ARPU forward month by month from the last month they have,
     with the same drift simulate_arpu_update applies, instead of re-randomising it."""
@@ -244,18 +276,20 @@ def main():
 
     mode = " (DRY RUN)" if args.dry_run else ""
     print(f"\n=== REPAIRING DATA GAPS{mode} ===\n")
-    print("[1/6] customer_value gap")
+    print("[1/7] customer_value gap")
     fill_customer_value_gap(args.dry_run)
-    print("\n[2/6] billing (unfreezes once customer_value advances)")
+    print("\n[2/7] billing (unfreezes once customer_value advances)")
     unfreeze_billing(args.dry_run)
-    print("\n[3/6] retire phantom alarms (cells serving nobody)")
+    print("\n[3/7] retire phantom alarms (cells serving nobody)")
     retire_phantom_alarms(args.dry_run)
-    print("\n[4/6] retire uncoupled legacy alarms (real cells, random placement)")
+    print("\n[4/7] retire uncoupled legacy alarms (real cells, random placement)")
     retire_uncoupled_alarms(args.dry_run)
-    print(f"\n[5/6] synthesise correlated alarm history ({args.alarm_days} days)")
+    print(f"\n[5/7] synthesise correlated alarm history ({args.alarm_days} days)")
     synthesize_alarm_history(args.alarm_days, args.dry_run)
-    print("\n[6/6] reclassify value segments against the live ARPU distribution")
+    print("\n[6/7] reclassify value segments against the live ARPU distribution")
     reclassify_segments(args.dry_run)
+    print("\n[7/7] regenerate NPS from each month's own segments")
+    regenerate_nps(args.dry_run)
     if not args.dry_run:
         report()
 

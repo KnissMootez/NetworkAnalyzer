@@ -856,16 +856,29 @@ def _gen_voip(msisdn, month, tech, volte_active):
     return (msisdn, month, mos, jitter, pl, label)
 
 
-def _gen_nps(msisdn, month, segment):
+# Real NPS answers pile up at the ends — people rate 0 or 10, rarely 3. Drawing a
+# uniform score inside each band (which is what this used to do) produced a dead-flat
+# histogram: every detractor score 0-6 landed within ~5% of the others, which no
+# survey has ever looked like.
+_NPS_SCORE_WEIGHTS = {
+    "detractor": ([0, 1, 2, 3, 4, 5, 6], [30, 10, 10, 12, 13, 12, 13]),
+    "passive":   ([7, 8],                [45, 55]),
+    "promoter":  ([9, 10],               [35, 65]),
+}
+
+def _gen_nps(msisdn, month, segment, rng=None):
+    """`rng` lets a caller pass a seeded Random so regeneration is reproducible."""
+    rnd = rng or random
     profile = _NPS_PROFILE.get(segment, _NPS_PROFILE["bronze"])
-    r = random.random()
+    r = rnd.random()
     if r < profile["detractor_p"]:
-        score = random.randint(0, 6); cat = "detractor"
-    elif r < profile["detractor_p"] + (1 - profile["detractor_p"] - profile["promoter_p"]):
-        score = random.randint(7, 8); cat = "passive"
+        cat = "detractor"
+    elif r < 1 - profile["promoter_p"]:
+        cat = "passive"
     else:
-        score = random.randint(9, 10); cat = "promoter"
-    return (msisdn, month, score, cat)
+        cat = "promoter"
+    vals, wts = _NPS_SCORE_WEIGHTS[cat]
+    return (msisdn, month, rnd.choices(vals, weights=wts)[0], cat)
 
 
 def backfill_new_tables(verbose=False):

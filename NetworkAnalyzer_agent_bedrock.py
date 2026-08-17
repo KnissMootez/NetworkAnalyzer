@@ -3965,21 +3965,69 @@ def _grounding_issues(text: str, results_blob: str):
     return ungrounded, total
 
 
-def _ground_text(text: str, results_blob: str, question: str) -> str:
-    """If the answer cites numbers absent from the query results (confabulation),
-    regenerate it once using ONLY the real rows. Shared by the tools + text paths."""
+# Sweeping claims about what is NOT happening. These are the dangerous ones: a wrong
+# number is embarrassing, but "no other regions are impacted" actively redirects an
+# operator away from a bigger fault. Observed live: "no active alarms on the cells",
+# "not linked to low RSRP or high latency", "no churn risk detected", and
+# "no other regions or technologies are impacted" while a 335-subscriber outage ran
+# elsewhere. None of them had a query behind them.
+_NEGATIVE_CLAIM_RE = re.compile(r"""
+      \bno\s+other\b
+    | \bnothing\s+else\b
+    | \bno\s+(?:additional|further)\s+\w+
+    | \bnot\s+a\s+network[-\s]wide\b
+    | \bisolated\s+to\b
+    | \bno\s+(?:active\s+)?(?:alarms?|incidents?|outages?|complaints?|churn\s+risk)\b
+    | \bno\s+(?:evidence|indication|sign)\s+of\b
+    | \bnot\s+(?:linked|related|attributable|due)\s+to\b
+    | \b(?:are|is|were|was)\s+not\s+(?:impacted|affected)\b
+    | \bno\s+\w+(?:\s+\w+)?\s+(?:are|is|were|was)\s+(?:impacted|affected)\b
+""", re.IGNORECASE | re.VERBOSE)
+
+
+def _ungrounded_negatives(text: str, steps_log=None) -> list:
+    """Negative claims with no zero-row query behind them.
+
+    A negative is only EARNED by a query that looked and came back empty. The tools
+    loop records those as '[sql 0] ...' in steps_log (they deliberately never reach
+    results_blob, since there are no rows to add), so that marker is the evidence."""
+    hits = [m.group(0).strip() for m in _NEGATIVE_CLAIM_RE.finditer(text or "")]
+    if not hits:
+        return []
+    looked_and_found_nothing = any(str(s).startswith("[sql 0]") for s in (steps_log or []))
+    return [] if looked_and_found_nothing else hits
+
+
+def _ground_text(text: str, results_blob: str, question: str, steps_log=None) -> str:
+    """If the answer cites numbers absent from the query results (confabulation), or
+    asserts an unverified negative, regenerate it once from the real rows.
+    Shared by the tools + text paths."""
     ung, tot = _grounding_issues(text, results_blob)
-    if tot and len(ung) >= 2 and len(ung) >= 0.5 * tot:
+    bad_numbers   = bool(tot and len(ung) >= 2 and len(ung) >= 0.5 * tot)
+    bad_negatives = _ungrounded_negatives(text, steps_log)
+    if not (bad_numbers or bad_negatives):
+        return text
+
+    rules = ["Restate the analysis using ONLY numbers that appear in the provided query "
+             "results. Do not invent figures or extrapolate beyond the data."]
+    if bad_numbers:
         print(f"[Grounding] {len(ung)}/{tot} cited numbers absent from results — regenerating")
-        regen = _llm(
-            "Restate the analysis using ONLY numbers that appear in the provided query results. "
-            "Do not invent figures or extrapolate beyond the data. 3-5 plain sentences, no markdown.",
-            f"Question: {question}\nQuery results (the ONLY valid numbers):\n{results_blob[:4000]}\n\n"
-            f"Draft (may contain wrong numbers): {text}\n\nCorrected answer:",
-            max_tokens=400, allow_thinking=False,
-        ).strip()
-        if regen and not regen.startswith("ERROR"):
-            return _dedupe_repeats(regen)
+    if bad_negatives:
+        print(f"[Grounding] unverified negative claim(s) {bad_negatives[:3]} — regenerating")
+        rules.append(
+            "DELETE every claim that something is absent, unaffected, unrelated, isolated, "
+            "or ruled out — no query looked for it, so it cannot be stated. Say only what "
+            "the results positively show. Do not replace such a claim with a hedge; remove it.")
+    rules.append("3-5 plain sentences, no markdown.")
+
+    regen = _llm(
+        " ".join(rules),
+        f"Question: {question}\nQuery results (the ONLY valid evidence):\n{results_blob[:4000]}\n\n"
+        f"Draft (may contain wrong numbers or unverified negatives): {text}\n\nCorrected answer:",
+        max_tokens=400, allow_thinking=False,
+    ).strip()
+    if regen and not regen.startswith("ERROR"):
+        return _dedupe_repeats(regen)
     return text
 
 
@@ -4028,7 +4076,7 @@ def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
     text = _dedupe_repeats(text)   # collapse Qwen's repeated-answer output
 
     # Grounding guard — regenerate from real rows if the answer cites absent numbers
-    text = _ground_text(text, results_blob, question)
+    text = _ground_text(text, results_blob, question, steps_log)
 
     chart = inp.get("chart") or None
     if is_treemap and treemap_ctx:

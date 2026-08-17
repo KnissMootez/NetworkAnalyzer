@@ -2288,6 +2288,63 @@ def simulate_sms_lifecycle(verbose=False):
 # STATUS
 # ═══════════════════════════════════════════════════════════════════════
 
+# Columns that are historical by nature — a birth date or an activation date is
+# SUPPOSED to be years old. Everything else with a date is a living series and
+# should be tracking "today".
+_STATIC_DATE_HINTS = ("birth", "activation", "registration", "start", "end",
+                      "launched", "resolved", "clear", "created", "payment", "trigger")
+_STALE_AFTER_DAYS = 40
+
+
+def check_data_freshness(verbose=True):
+    """Print any living series whose newest row is well behind today.
+
+    Three separate tables froze silently before this existed, each because a backfill
+    anchored its window on data instead of on the clock — and each stayed frozen for
+    months because everything kept reporting success. A stale table cannot announce
+    itself, so something has to go looking."""
+    today = datetime.now().date()
+    conn = sc_conn()
+    try:
+        conn.execute(f"ATTACH DATABASE '{OP_DB}' AS op")
+    except sqlite3.OperationalError:
+        pass
+    stale = []
+    for master, prefix in (("sqlite_master", ""), ("op.sqlite_master", "op.")):
+        for (tbl,) in conn.execute(
+                f"SELECT name FROM {master} WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+            for col in conn.execute(f"PRAGMA table_info({tbl})"):
+                name = col[1].lower()
+                if not any(k in name for k in ("date", "month")):
+                    continue
+                if any(h in name for h in _STATIC_DATE_HINTS):
+                    continue
+                try:
+                    mx = conn.execute(f"SELECT MAX({col[1]}) FROM {prefix}{tbl}").fetchone()[0]
+                except sqlite3.OperationalError:
+                    continue
+                if not mx or not isinstance(mx, str):
+                    continue
+                try:                                   # 'YYYY-MM' or 'YYYY-MM-DD'
+                    parts = mx[:10].split("-")
+                    newest = date(int(parts[0]), int(parts[1]),
+                                  int(parts[2]) if len(parts) > 2 else 1)
+                except (ValueError, IndexError):
+                    continue
+                behind = (today - newest).days
+                if behind > _STALE_AFTER_DAYS:
+                    stale.append((behind, f"{prefix}{tbl}.{col[1]}", mx[:10]))
+    conn.close()
+    if stale and verbose:
+        print(f"\n  [STALE DATA] these series have stopped advancing (> {_STALE_AFTER_DAYS} days behind):")
+        for behind, col, mx in sorted(stale, reverse=True):
+            print(f"    {behind:5}d behind — {col} (newest {mx})")
+        print("    A backfill window is probably anchored on data instead of the clock.\n")
+    elif verbose:
+        print("  [FRESHNESS] all living series are current.")
+    return stale
+
+
 def print_status():
     now          = datetime.now().strftime("%H:%M:%S")
     active_subs  = sc_query("SELECT COUNT(*) FROM subscribers WHERE is_active=1")[0][0]
@@ -2351,6 +2408,7 @@ def main():
     ensure_today_qoe(verbose=True)
     ensure_current_month(verbose=True)
 
+    check_data_freshness()
     print_status()
 
     tick_count = 0

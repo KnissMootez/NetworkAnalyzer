@@ -49,8 +49,9 @@ slice of the two databases:
 
 \begin{itemize}
     \item \textbf{KPIs and alarms} --- network performance metrics
-    (throughput, latency, drop rate) get nudged, and every so often a
-    new alarm gets raised on a cell (Figure~\ref{fig:ch4-alarms}).
+    (throughput, latency, drop rate) get nudged, faults get raised on
+    cells, and the two are wired to each other in both directions
+    (Figure~\ref{fig:ch4-alarms}).
     \item \textbf{Usage} --- monthly data and voice usage accumulate
     for a rotating sample of subscribers, the same way real usage
     would build up gradually over the course of a billing month rather
@@ -185,6 +186,59 @@ itself is never deleted, so a question like ``what happened to this
 customer at 14:32 today'' still has a real answer to give hours or days
 later --- the incident heals, but the history of it having happened
 does not disappear with it.
+
+\section{Alarms That Actually Mean Something}
+
+The blast-radius problem had a sibling that hid for much longer. Alarms
+and KPIs both looked fine on their own --- the alarms table filled up,
+the KPI numbers moved --- so neither invited a second look. But they
+were never connected to each other. Each tick raised an alarm on a cell
+picked uniformly at random, wrote the row, and stopped there, while the
+KPI generator rolled its own separate dice and never read the alarms
+table. Two independent random processes, presented as one story about
+network health. The giveaway was in the data: cells carrying an active
+\emph{critical} alarm measured a slightly \emph{lower} drop rate than
+cells with no alarm at all --- an inverted correlation, which is what
+noise looks like when you go looking for a relationship that was never
+there. And since cells were picked from the whole network rather than
+the parts of it serving people, 62\% of alarms sat on cells with zero
+subscribers on them.
+
+Fixing it meant wiring the two together in both directions, because
+real faults work both ways. Equipment faults --- a power failure, a
+hardware fault, a backhaul link going down --- announce themselves, and
+the degraded counters follow as a consequence. Performance faults are
+the reverse: congestion, interference and coverage holes have no box to
+raise a flag, and the only way anyone finds out is by watching the
+counters cross a threshold, which is what a real network management
+system calls a threshold-crossing alert. So a raised fault now degrades
+the cell it sits on --- each fault type hitting the metric it would
+actually hit, scaled by severity --- and opens real incidents for the
+customers on that cell if it is serious enough, feeding the same
+evidence trail and churn coupling described above. Running the other
+way, a detector reads each cell-day and raises the alarm those numbers
+deserve.
+
+One detail there is worth keeping, because the obvious approach fails
+quietly. Thresholds have to be relative to the technology, never
+absolute: a 1.9\% drop rate is a broken 5G cell and a completely
+ordinary 2G one, so a flat ``drop rate above 2\%'' rule flags 182 2G
+cells, 48 3G cells, and not a single 4G or 5G one. It does not detect
+faults --- it rediscovers that 2G is 2G. Every threshold is therefore
+expressed against that technology's own healthy baseline.
+
+Worth admitting, since it explains how the whole thing went unnoticed:
+the KPI update function had never actually written a row. The table it
+writes to was missing a uniqueness constraint its upsert depended on,
+the database helper swallowed the resulting error, and the function
+went on reporting how many cells it had updated every tick regardless.
+A process that reports success while doing nothing is worse than one
+that crashes, and the helpers now print real errors instead of
+retrying past them. With that fixed and the coupling in place, cells
+under an active alarm run roughly twice the drop rate of clean cells
+within every technology --- and every active alarm sits on a cell that
+actually serves customers.
+
 
 \section{Churn Tracks the Live World, Not Just Usage}
 

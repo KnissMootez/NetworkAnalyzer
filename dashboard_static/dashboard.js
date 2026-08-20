@@ -101,17 +101,17 @@ async function loadNetwork() {
   // the answer (Omashu is the unhealthiest region, not Ba Sing Se) and gives the chart a
   // readable spread. Regions above the network-wide rate are highlighted; the rest are
   // context, not the story.
-  const withRate = byReg.filter(r => r.cells)
-                        .map(r => ({ ...r, rate: 100 * (r.alarms || 0) / r.cells }));
-  const netRate = 100 * withRate.reduce((a, r) => a + (r.alarms || 0), 0)
-                      / withRate.reduce((a, r) => a + r.cells, 0);
+  const withRate = byReg.filter(r => r.all_cells)
+                        .map(r => ({ ...r, rate: 100 * (r.all_alarms || 0) / r.all_cells }));
+  const netRate = 100 * withRate.reduce((a, r) => a + (r.all_alarms || 0), 0)
+                      / withRate.reduce((a, r) => a + r.all_cells, 0);
   regionBar('net-alarms-chart', withRate, 'rate',
             `Active alarms per 100 cells (network avg ${netRate.toFixed(1)})`, {
     fmt: '.1f',
     color: withRate.slice().sort((a, b) => a.rate - b.rate)
                    .map(r => (r.rate > netRate ? PALETTE[0] : '#3a4152')),
     custom: withRate.slice().sort((a, b) => a.rate - b.rate)
-                    .map(r => [r.alarms || 0, r.cells]),
+                    .map(r => [r.all_alarms || 0, r.all_cells]),
     hover: '%{y}<br>%{x:.1f} per 100 cells<br>%{customdata[0]} alarms on %{customdata[1]} cells<extra></extra>',
   });
 

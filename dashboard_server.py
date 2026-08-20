@@ -120,7 +120,16 @@ def net_by_region(tech: str = "4G,5G"):
                ROUND(AVG(k.dropped_call_rate),3)  AS drop_rate,
                ROUND(AVG(k.sinr_avg),1)           AS sinr,
                COUNT(DISTINCT a.alarm_id)         AS alarms,
-               COUNT(DISTINCT c.cell_id)          AS cells
+               -- Alarm RATE is computed over every cell in the region, not just the
+               -- 4G/5G subset this query averages KPIs over. Using the filtered subset
+               -- gave denominators as small as 2 cells and rates above 140 per 100,
+               -- which ranks regions by how small they are rather than how healthy.
+               (SELECT COUNT(*) FROM cells c2 JOIN sites s2 ON c2.site_id=s2.site_id
+                 WHERE s2.region = s.region)      AS all_cells,
+               (SELECT COUNT(*) FROM network_alarms a2
+                  JOIN cells c3 ON a2.cell_id = c3.cell_id
+                  JOIN sites s3 ON c3.site_id = s3.site_id
+                 WHERE s3.region = s.region AND a2.is_active = 1) AS all_alarms
         FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id
         LEFT JOIN network_alarms a ON a.cell_id=c.cell_id AND a.is_active=1
         WHERE k.date=(SELECT MAX(date) FROM kpis_daily){tc}

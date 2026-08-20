@@ -1236,6 +1236,34 @@ def _build_data_profile() -> str:
     except Exception as e:
         lines.append(f"(data profile error: {e})")
 
+    # ── The real offer catalog, verbatim ────────────────────────────────
+    # Ten rows. The agent kept naming real offers ("HVC Gold Upgrade") and then
+    # inventing their terms ("20% discount" when the row says 15%), because it had
+    # the names from the schema but never queried the table for the numbers. Listing
+    # the whole catalog here is cheaper than a query and removes the reason to guess.
+    # Terms are emitted structurally, not from the free-text description, which still
+    # quotes a stale TND currency.
+    try:
+        _oc = sqlite3.connect(f"file:{OP_DB}?mode=ro", uri=True)
+        _offers = _oc.execute(
+            "SELECT offer_name, target_campaign, target_technology, discount_pct, "
+            "bonus_data_gb, validity_days FROM offers WHERE is_active=1 ORDER BY offer_id"
+        ).fetchall()
+        _oc.close()
+        if _offers:
+            lines.append("\n=== OFFER CATALOG (op.offers — the ONLY valid offer terms) ===")
+            lines.append("When recommending an offer, use one of these names AND its real "
+                         "terms. Never invent a discount, bonus, or benefit not listed here.")
+            for _nm, _camp, _tech, _disc, _bonus, _days in _offers:
+                _bits = []
+                if _disc:  _bits.append(f"{_disc:g}% discount")
+                if _bonus: _bits.append(f"{_bonus:g} GB bonus data")
+                if _days:  _bits.append(f"valid {_days:g} days")
+                lines.append(f"  {_nm} [{_camp or 'general'}/{_tech or 'any'}]: "
+                             + (", ".join(_bits) if _bits else "no discount or bonus"))
+    except Exception as _e:
+        print(f"[DataProfile] offer catalog unavailable: {_e}")
+
     lines.append("\n=== END DATA FACTS ===")
     result = "\n".join(lines)
     # Print summary to console (not full profile — too long)
@@ -2856,7 +2884,7 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                         if _streaming_queue:
                             _is_err = bool(results and "error" in results[0])
                             _streaming_queue.put({"type": "step_sql", "step": step+1,
-                                "tag": tag.rstrip(":"), "sql": sql[:200],
+                                "tag": tag.rstrip(":"), "sql": sql[:_STEP_SQL_CHARS],
                                 "rows": 0 if _is_err else (len(results) if results else 0),
                                 "error": results[0]["error"] if _is_err else None})
                         if results and "error" not in results[0]:
@@ -2982,7 +3010,7 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                 steps_log.append(f"[auto-tag {_inferred_tag}] {_salvaged_sql[:120]}")
                 if _streaming_queue:
                     _streaming_queue.put({"type": "step_sql", "step": step+1,
-                        "tag": _inferred_tag.rstrip(':'), "sql": _salvaged_sql[:200],
+                        "tag": _inferred_tag.rstrip(':'), "sql": _salvaged_sql[:_STEP_SQL_CHARS],
                         "rows": 0 if _is_err else len(_rows),
                         "error": _rows[0].get("error") if _is_err else None})
             else:
@@ -3170,7 +3198,7 @@ SELECT COUNT(*) as n FROM subscribers s JOIN subscriber_technology st ON s.msisd
     if _streaming_queue:
         _is_err = bool(results and "error" in results[0])
         _streaming_queue.put({"type": "step_sql", "step": 1,
-            "tag": _fast_tag, "sql": sql[:200],
+            "tag": _fast_tag, "sql": sql[:_STEP_SQL_CHARS],
             "rows": 0 if _is_err else len(results),
             "error": results[0]["error"] if _is_err else None})
 
@@ -3464,6 +3492,13 @@ _stop_event       = None   # threading.Event — set to abort generation
 _CACHE_THRESHOLD  = 0.92
 _CACHE_MAX        = 30
 _sem_cache: list  = []  # each entry: {"vec": np.array, "question": str, "result": dict}
+
+# How much of each query the steps panel shows. Was 200, which cut a four-table
+# join off right where the WHERE clause began -- the part that determines the
+# rows. That made the audit trail useless for exactly the queries complex enough
+# to be worth auditing.
+_STEP_SQL_CHARS = 2000
+
 
 def _cache_lookup(question: str):
     """Return cached result if question is semantically identical to a recent one, else None."""
@@ -4286,7 +4321,7 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                         treemap_ctx += f"\nResults ({_n} rows): {json.dumps(sample, default=str)}\n"
                 if _streaming_queue:
                     _streaming_queue.put({"type": "step_sql", "step": step + 1, "tag": db.upper(),
-                                          "sql": sql[:200], "rows": _n,
+                                          "sql": sql[:_STEP_SQL_CHARS], "rows": _n,
                                           "error": rows[0]["error"] if (rows and "error" in rows[0]) else None})
                 continue
 

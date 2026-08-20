@@ -119,7 +119,8 @@ def net_by_region(tech: str = "4G,5G"):
                ROUND(AVG(k.availability_pct),2)   AS avail,
                ROUND(AVG(k.dropped_call_rate),3)  AS drop_rate,
                ROUND(AVG(k.sinr_avg),1)           AS sinr,
-               COUNT(DISTINCT a.alarm_id)         AS alarms
+               COUNT(DISTINCT a.alarm_id)         AS alarms,
+               COUNT(DISTINCT c.cell_id)          AS cells
         FROM kpis_daily k JOIN cells c ON k.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id
         LEFT JOIN network_alarms a ON a.cell_id=c.cell_id AND a.is_active=1
         WHERE k.date=(SELECT MAX(date) FROM kpis_daily){tc}

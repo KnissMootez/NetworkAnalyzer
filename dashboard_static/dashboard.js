@@ -35,7 +35,9 @@ function regionBar(id, rows, key, titleText, opts = {}) {
     y: sorted.map(r => r.region),
     x: sorted.map(r => r[key]),
     marker: { color: opts.color || PALETTE[0] },
-    hovertemplate: `%{y}<br>%{x:${opts.fmt || '.1f'}}${opts.unit || ''}<extra></extra>`,
+    customdata: opts.custom,
+    hovertemplate: opts.hover
+      || `%{y}<br>%{x:${opts.fmt || '.1f'}}${opts.unit || ''}<extra></extra>`,
   }], {
     title: title(titleText),
     margin: { l: 10, r: 30, t: 40, b: 40 },
@@ -93,7 +95,25 @@ async function loadNetwork() {
   regionBar('net-dl',    byReg, 'dl',        'Avg download by region (Mbps)', { unit: ' Mbps' });
   regionBar('net-drop',  byReg, 'drop_rate', 'Drop rate by region (%)',      { fmt: '.3f', unit: '%' });
   regionBar('net-sinr',  byReg, 'sinr',      'Avg SINR by region (dB)',      { unit: ' dB' });
-  regionBar('net-alarms-chart', byReg, 'alarms', 'Active alarms by region',  { fmt: 'd' });
+  // Alarms per 100 cells, NOT raw alarm counts. Raw counts just rank regions by how
+  // many cells they have -- Ba Sing Se holds a fifth of the network, so it "wins" every
+  // count chart while the small regions render as invisible slivers. Normalizing changes
+  // the answer (Omashu is the unhealthiest region, not Ba Sing Se) and gives the chart a
+  // readable spread. Regions above the network-wide rate are highlighted; the rest are
+  // context, not the story.
+  const withRate = byReg.filter(r => r.cells)
+                        .map(r => ({ ...r, rate: 100 * (r.alarms || 0) / r.cells }));
+  const netRate = 100 * withRate.reduce((a, r) => a + (r.alarms || 0), 0)
+                      / withRate.reduce((a, r) => a + r.cells, 0);
+  regionBar('net-alarms-chart', withRate, 'rate',
+            `Active alarms per 100 cells (network avg ${netRate.toFixed(1)})`, {
+    fmt: '.1f',
+    color: withRate.slice().sort((a, b) => a.rate - b.rate)
+                   .map(r => (r.rate > netRate ? PALETTE[0] : '#3a4152')),
+    custom: withRate.slice().sort((a, b) => a.rate - b.rate)
+                    .map(r => [r.alarms || 0, r.cells]),
+    hover: '%{y}<br>%{x:.1f} per 100 cells<br>%{customdata[0]} alarms on %{customdata[1]} cells<extra></extra>',
+  });
 
   // "Network health" used to be alarms (0-150) and availability (95-100) on one plot
   // with two y-axes. Two scales on one chart invent a correlation the data does not

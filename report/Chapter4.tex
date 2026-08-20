@@ -73,7 +73,7 @@ instead of a string that has to be hoped for and parsed, which is what
 makes the whole system meaningfully more reliable than the Chapter~\ref{chapter:BF-DFP}
 version, not a difference in the underlying idea.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \definecolor{agentblue}{HTML}{4A6FA5}
 \definecolor{toolgray}{HTML}{6B7280}
@@ -164,6 +164,93 @@ consecutive \texttt{run\_sql} iterations of the loop from
 Figure~\ref{fig:agent-loop} before the model called \texttt{conclude}.}
 \label{fig:ch5-steps-panel}
 \end{figure}
+
+\section{Knowing When Not to Answer Yet}
+
+The first decision the loop makes is not which query to run. It is whether
+the question can be answered honestly as asked.
+
+Take a question the dashboard gets constantly: ``5G upsell opportunities
+by region.'' That sounds specific enough. It is not. Does it mean every
+subscriber holding a 5G-capable handset who is still on a 4G plan? Only
+the high-value ones, because a campaign budget is finite? Only the ones
+who are also showing churn risk, because those are the ones worth
+spending a retention offer on? Those are three different lists, three
+different campaigns, and three different costs. An agent that quietly
+picks one and answers looks confident and is probably answering a
+question nobody asked --- and, worse, the answer gives no clue which
+reading it used.
+
+So before running anything, the agent checks whether it should ask first.
+Three gates, cheapest first, and most questions pass straight through all
+three without paying for any of them:
+
+\begin{itemize}
+    \item \textbf{A threshold the human should set.} Questions phrased
+    around ``high ARPU,'' ``heavy data users'' or ``above average'' get a
+    number input rather than a guess. This one exists because relative
+    baselines are actively misleading on skewed data: a handful of very
+    high-spending subscribers drag the mean up, so ``above average ARPU''
+    silently excludes customers a human would obviously count. The
+    operator types the cutoff, with a ``let the agent choose a sensible
+    one'' fallback for when they genuinely do not care.
+    \item \textbf{A breakdown with no stated dimension.} ``Show me a
+    drilldown of subscribers'' names no axis to break down by, so the
+    agent offers a small catalog of real drill paths --- by region, by
+    technology, by value segment. This gate is a plain lookup, no model
+    call, so it costs nothing.
+    \item \textbf{Genuine vagueness.} ``What should we focus on,''
+    ``biggest problems,'' ``where is there opportunity.'' Only these
+    reach a model call, and only after a keyword pre-filter
+    (\emph{best}, \emph{worst}, \emph{improve}, \emph{biggest},
+    \emph{priorit\ldots}) decides the question is vague enough to be
+    worth the latency. A specific question never pays for this check.
+\end{itemize}
+
+% =====================================================================
+% SCREENSHOT NEEDED --- figures/ch5-clarify.png
+% Where: chat UI (localhost:8000), Copilot tab.
+% What to capture: ask "5G upsell opportunities by region" and capture the
+% clarify card BEFORE clicking an option --- the question the agent asks
+% plus the list of option buttons, ideally with the answer that follows
+% after picking one visible underneath.
+% =====================================================================
+\begin{figure}[htbp]
+\centering
+% \includegraphics[width=0.85\textwidth]{figures/ch5-clarify.png}
+\caption{The agent declining to guess: asked for ``5G upsell
+opportunities by region,'' it offers three concrete readings of the
+question plus an explicit ``just decide for me,'' and only runs a query
+once one is chosen.}
+\label{fig:ch5-clarify}
+\end{figure}
+
+Two details make this behave like a tool rather than a chatbot demanding
+a conversation.
+
+The options are \emph{complete standalone questions}, not dialogue turns.
+Clicking ``High-value customers with 5G-capable devices but not on 5G
+plan'' runs exactly that, as though it had been typed. There is no
+half-remembered state waiting to be resumed, and nothing to go stale if
+the user wanders off and asks something else instead. It also removes an
+obvious way to build an infinite loop: the agent remembers which options
+it just offered, so a clicked option runs directly instead of tripping
+the same gate again and being asked to clarify its own clarification.
+
+And the agent never asks the user to define a term the data already
+defines. ``High-value customer'' is not a matter of opinion here --- it
+is a column. Neither is ``having an issue right now,'' which is a row in
+the live incident log with a timestamp on it. Questions like ``do we have
+any HVCs with streaming issues right now'' therefore skip the whole gate
+and run immediately, because every term in them is already pinned down by
+the schema. Asking about those would not be careful, it would be
+annoying.
+
+The pattern here is the same one that runs through the rest of this
+chapter. An agent that guesses and sounds certain is worse than one that
+admits the question has more than one reading, in exactly the way an
+answer built on numbers it never queried is worse than one that says it
+does not know.
 
 \section{Grounding the Agent in Domain Knowledge}
 

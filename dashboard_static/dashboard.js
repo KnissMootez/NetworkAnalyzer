@@ -22,6 +22,28 @@ function draw(id, traces, layoutOverride = {}) {
   Plotly.react(el, traces, { ...LAYOUT, ...layoutOverride, xaxis: { ...LAYOUT.xaxis, ...(layoutOverride.xaxis || {}) }, yaxis: { ...LAYOUT.yaxis, ...(layoutOverride.yaxis || {}) } }, CFG);
 }
 
+// Region charts are HORIZONTAL and SORTED. There are 21 regions with names like
+// "Southern Water Tribe Capital": as rotated x-labels they were being clipped to
+// "Southern Wat" and colliding with the legend. Horizontal bars let the names read
+// straight across, and sorting turns each chart into a ranking you can read top-down
+// instead of an unordered picket fence.
+function regionBar(id, rows, key, titleText, opts = {}) {
+  const sorted = [...rows].filter(r => r[key] != null)
+                          .sort((a, b) => a[key] - b[key]);   // asc — Plotly draws bottom-up
+  draw(id, [{
+    type: 'bar', orientation: 'h',
+    y: sorted.map(r => r.region),
+    x: sorted.map(r => r[key]),
+    marker: { color: opts.color || PALETTE[0] },
+    hovertemplate: `%{y}<br>%{x:${opts.fmt || '.1f'}}${opts.unit || ''}<extra></extra>`,
+  }], {
+    title: title(titleText),
+    margin: { l: 10, r: 30, t: 40, b: 40 },
+    yaxis: { automargin: true, gridcolor: 'transparent', tickfont: { size: 11 } },
+    showlegend: false,
+  });
+}
+
 const get = (path) => fetch(API + path).then(r => r.json()).catch(() => null);
 const num = (n) => (n == null ? '—' : Number(n).toLocaleString());
 const fix = (n, d = 1) => (n == null ? '—' : Number(n).toFixed(d));
@@ -68,14 +90,19 @@ async function loadNetwork() {
     { label: 'Active Cells', value: num(s.cells), sub: 'monitored' },
     { label: 'Active Users', value: num(s.total_users), sub: 'on network' },
   ]);
-  const reg = byReg.map(x => x.region);
-  draw('net-dl', [{ type: 'bar', x: reg, y: byReg.map(x => x.dl), marker: { color: '#4f8ef7' } }], { title: title('Avg download by region (Mbps)') });
-  draw('net-drop', [{ type: 'bar', x: reg, y: byReg.map(x => x.drop_rate), marker: { color: '#e05c5c' } }], { title: title('Drop rate by region (%)') });
-  draw('net-sinr', [{ type: 'bar', x: reg, y: byReg.map(x => x.sinr), marker: { color: '#7c5cbf' } }], { title: title('Avg SINR by region (dB)') });
-  draw('net-avail', [
-    { type: 'bar', name: 'Alarms', x: reg, y: byReg.map(x => x.alarms), marker: { color: '#e05c5c' } },
-    { type: 'scatter', name: 'Availability %', x: reg, y: byReg.map(x => x.avail), yaxis: 'y2', mode: 'lines+markers', line: { color: '#3ecf8e' } },
-  ], { title: title('Network health by region'), yaxis2: { overlaying: 'y', side: 'right', range: [95, 100], gridcolor: 'transparent' } });
+  regionBar('net-dl',    byReg, 'dl',        'Avg download by region (Mbps)', { unit: ' Mbps' });
+  regionBar('net-drop',  byReg, 'drop_rate', 'Drop rate by region (%)',      { fmt: '.3f', unit: '%' });
+  regionBar('net-sinr',  byReg, 'sinr',      'Avg SINR by region (dB)',      { unit: ' dB' });
+  regionBar('net-alarms-chart', byReg, 'alarms', 'Active alarms by region',  { fmt: 'd' });
+
+  // "Network health" used to be alarms (0-150) and availability (95-100) on one plot
+  // with two y-axes. Two scales on one chart invent a correlation the data does not
+  // contain, so they are two charts now. Availability is plotted as DOWNTIME
+  // (100 - avail): a 95-100 axis turns ordinary variation into a cliff, while
+  // downtime is a real magnitude that starts honestly at zero.
+  const downtime = byReg.map(r => ({ ...r, downtime: r.avail == null ? null : 100 - r.avail }));
+  regionBar('net-avail', downtime, 'downtime', 'Downtime by region (%, lower is better)',
+            { fmt: '.2f', unit: '%' });
 
   table('net-cells', [
     { key: 'cell_id', label: 'Cell' }, { key: 'region', label: 'Region' }, { key: 'site_name', label: 'Site' },

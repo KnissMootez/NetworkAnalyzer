@@ -1,23 +1,24 @@
 \chapter*{General introduction}
 \addcontentsline{toc}{chapter}{General introduction}
-Artificial Intelligence has advanced to a point where failing to leverage it — even at its most basic — risks falling behind. The time saved through AI and LLMs is too valuable to ignore, allowing research \& development to be further accelerated, but also complex data-driven operations — where decisions once required teams of analysts and hours of querying — to be handled in seconds through natural conversation. This applies especially in the telecommunications field, where the industry is too data sensitive, as it generates a vast amount of network performance metrics, subscriber behavior data and commercial indicators in real time. Usually this proceess is done through dedicated teams, specialized tools and significant time investment. However with the emergence of LLMs and their advanced reasoning, as well as agentic AI, it is now possible for one operator to simply ask a question and receive a well informed, data-backed response promptly. The project explores this possiblity further, building an aI-powered network analytics assistant that allows network operators to query, analyze and act on both network and commercial data through natural language alone in order to help improve customer experience and boost revenue .
+Artificial Intelligence has advanced to a point where failing to leverage it — even at its most basic — risks falling behind. The time saved through AI and LLMs is too valuable to ignore, allowing research \& development to be further accelerated, but also complex data-driven operations — where decisions once required teams of analysts and hours of querying — to be handled in seconds through natural conversation. This applies especially in the telecommunications field, where the industry is too data sensitive, as it generates a vast amount of network performance metrics, subscriber behavior data and commercial indicators in real time. Usually this process is done through dedicated teams, specialized tools and significant time investment. However with the emergence of LLMs and their advanced reasoning, as well as agentic AI, it is now possible for one operator to simply ask a question and receive a well informed, data-backed response promptly. The project explores this possibility further, building an AI-powered network analytics assistant that allows network operators to query, analyze and act on both network and commercial data through natural language alone in order to help improve customer experience and boost revenue.
 
-Today, a commercial manager who would want to identify upsell opportunities in a specific region, for instance 5G upsell, and how to approach this upsell campaign, would need to file a request to a data analyst in order to consult strategies and best in slot options. Accessing the data is rarely the bottleneck. Modern telecom operators have dashboards, BI tools, etc... The real issue is what comes after extracting said data, yes it would take time to get the right query in order to get exactly what the manager wants, but what takes even more time is making sense of it: raww metrics in isolation mean little; their value eemerges only when contextualized/correlated, and interpreted across multiple dimensions simultaneously. A single anomaly in network performance could be insignificant on its own, might even just be an outlier, but when viiewed alongside subscriber complaint patterns, billing trends and geographic coverage gaps. Arriving at the right conclusion requires not just data access, but cross-domain expertise, time and collaborative analysis across multiple teams. 
+Today, a commercial manager who would want to identify upsell opportunities in a specific region, for instance 5G upsell, and how to approach this upsell campaign, would need to file a request to a data analyst in order to consult strategies and best in slot options. Accessing the data is rarely the bottleneck. Modern telecom operators have dashboards, BI tools, etc... The real issue is what comes after extracting said data, yes it would take time to get the right query in order to get exactly what the manager wants, but what takes even more time is making sense of it: raw metrics in isolation mean little; their value emerges only when contextualized/correlated, and interpreted across multiple dimensions simultaneously. A single anomaly in network performance could be insignificant on its own, might even just be an outlier — but viewed alongside subscriber complaint patterns, billing trends and geographic coverage gaps, that same anomaly can turn out to be the first sign of something worth acting on. Arriving at the right conclusion requires not just data access, but cross-domain expertise, time and collaborative analysis across multiple teams.
 
 In response to this challenge, this project sets out to develop an AI-powered conversational assistant for telecom operators, capable of running queries quickly, and more importantly, correctly analyze and come up with solutions/suggestions/overview, reducing dependency on technical teams for day-to-day analytical tasks.
 The specific objectives are:
 \begin{itemize}
     \item Design a simulated telecom environment representative of a hypothetical operator's data structure
-    \item Build a natural language agent capable of multi-step SQL reeasoning across multiplee data domains (coomercial and network)
-    \item Integrate a system that would help ground the ageent's responses in domain  knowledge
+    \item Build a natural language agent capable of multi-step SQL reasoning across multiple data domains (commercial and network)
+    \item Integrate a system that would help ground the agent's responses in domain knowledge
     \item Enable the agent to execute multiple other operations, such as csv export and visual displays.
-    \item placeholder for more objectives based on how thee project goes
+    \item Keep that environment continuously live rather than a fixed snapshot, so the assistant is always answering against data that is actually moving
+    \item Keep a human in the loop for anything operational: the agent proposes an action, a person reviews it before it goes anywhere
 \end{itemize}
 
 
 The project follows an empirical, iterative methodology — driven by experimentation and progressive refinement rather than a predefined specification. Approaches were selected, tested, and either validated or discarded based on observed results, making the development process as much a research exercise as an engineering one.
 
-As a result, the scope was redefineed to what is feasible rather than what was initially planned; it is now bounded to a simulated telecom eenvironment repreesenting a hypothetical operator with around 50000 subscribers across a fictional geography, covering network domain in sitees, cells, KPIs and alarms, as well as the commercial domain via subscribers, billing churn, campaigns.  Real-time hardware integration, production infrastructure, and multi-operator scenarios fall outside the current scope for now.
+As a result, the scope was redefined to what is feasible rather than what was initially planned; it is now bounded to a simulated telecom environment representing a hypothetical operator with around 50{,}000 subscribers across a fictional geography, covering the network domain in sites, cells, KPIs and alarms, as well as the commercial domain via subscribers, billing, churn and campaigns. Real-time hardware integration, production infrastructure, and multi-operator scenarios fall outside the current scope for now.
 
 The produced deliverables are:
 \begin{itemize}
@@ -28,17 +29,24 @@ The produced deliverables are:
     \item A RAG knowledge base grounding the agent in telecom domain
 \end{itemize}
 
-A general introduction typically includes several key elements: Background and Context, Problem Statement, Objectives and Goals, Methodology, Scope and Deliverables, and Structure of the Report.\\
+The rest of this report follows the order the work actually happened, rather than
+a tidy after-the-fact architecture.
 
-Background and Context: Provide an overview of the project's background and context. Explain why the project is important and relevant in its field or industry. Discuss any previous work or research that has led to the current project.\\
+\textbf{Chapter~\ref{ch:context}} covers the host organization and the context the
+project sits in --- what SmartCare is, and why building against it directly was
+never an option.
 
-Problem Statement: Clearly define the problem or issue that the project aims to address. Describe the scope and limitations of the project, and explain why it is worth investigating or solving.\\
+\textbf{Chapter~\ref{chapter:BF-DFP}} lays the foundation: two synthetic databases
+modelled on TM Forum's abstractions, a first agent loop running on a local model
+to prove the idea works, and then the move to cloud inference once local hardware
+turned out to be the ceiling rather than the idea itself.
 
-Objectives and Goals: Outline the specific objectives and goals of the project. These should be clear, measurable, and achievable outcomes that the project aims to accomplish. Discuss how achieving these objectives will contribute to addressing the problem statement.\\
+\textbf{Chapter~\ref{ch:livingdb}} turns that static data into a living environment
+--- a simulator that keeps KPIs, alarms, incidents and churn moving, so the
+assistant is always reading a target that never sits still.
 
-Methodology: Describe the approach or methodology used to conduct the project. Explain the research methods, techniques, or tools employed to gather data, analyze information, and develop solutions. Provide justification for the chosen methodology and discuss any alternatives considered.\\
-
-Scope and Deliverables: Define the scope of the project and the deliverables expected upon completion. Outline what will be included in the report and any additional materials or outputs produced as part of the project.\\
-
-Structure of the Report: Provide an overview of the structure and organization of the report. Briefly describe each section or chapter and how they contribute to the overall narrative of the project.
+\textbf{Chapter~\ref{ch:agent}} covers the agent itself: the reasoning loop, how it
+grounds its queries in the real schema instead of guessing, how it catches its own
+mistakes before they reach the user, and everything it can do beyond answering in
+plain text --- charts, exports, and operational actions handed to a human for review.
 

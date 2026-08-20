@@ -95,6 +95,9 @@ select:focus, input:focus { border-color: var(--accent); }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .grid-2 .panel { margin-bottom: 0; }
 .chart { width: 100%; height: 300px; }
+/* 21 regions as horizontal bars need room for one label per row — at 300px the
+   rows collapse and the tick labels start dropping out. */
+.chart-tall { height: 480px; }
 .section-label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 
 @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }

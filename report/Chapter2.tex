@@ -11,7 +11,7 @@ From there, we built two SQLite databases inspired by that taxonomy, populated w
 
 
 
-\section{Database Design}
+\section{Database Design}\label{sec:db-design}
 
 The data layer is split into two separate SQLite databases, each with a distinct responsibility --- a separation that mirrors the classic OSS/BSS divide in telecom architecture \cite{tmforum_sid}.
 
@@ -62,7 +62,7 @@ many groups as the right? Not an accident. The network domain naturally
 produces far more distinct data grains --- per-cell, per-hour, per-app ---
 than the commercial side, which mostly reduces to who a customer is and
 what they have been billed or offered. That imbalance actually foreshadows
-a real design decision made later in the agent (Chapter~5): when a
+a real design decision made later in the agent (Chapter\ref{ch:agent}): when a
 question touches both domains, the agent has to decide which side to
 query first, and that decision is a lot easier when the boundary is this
 visible from the start. The grouping here is not just illustrative either
@@ -159,7 +159,7 @@ code's job instead of the database's. Fine trade, since every row in
 this environment is written by scripts we control in the first place.
 
 
-\subsection{Confidentiality Through a Fictional Geography}
+\subsection{Confidentiality Through a Fictional Geography}\label{sec:fictional-geography}
 
 Even though the schema itself is grounded in TM Forum's real abstractions,
 none of the region, city, or site names in the data are real — they are
@@ -220,7 +220,7 @@ handles the layout and reactivity out of the box.
 
 Crude as it was, it proved the core idea worked: the model could turn a
 natural-language question into a real query against the schema from
-Section~2.1, chain a couple of query steps together when one was not
+Section~\ref{sec:db-design}, chain a couple of query steps together when one was not
 enough, and land on something coherent. That was enough to justify
 continuing down this path — the tag-based format itself stuck around
 much longer than the local models did, and still shows up later in the
@@ -253,10 +253,92 @@ to make the whole point of the project — ``ask a question, get an
 answer'' — feel broken rather than fast. Bigger local models were an
 option in theory, but the same 4~GB ceiling that made 7B–8B slow was only
 going to make anything larger worse, not better. That hardware ceiling is
-what forced the next decision, covered in the following chapter: whether
-to keep pushing on local models or move the reasoning off-device entirely.
+what forced the next decision: whether to keep pushing on local models or
+move the reasoning off-device entirely.
 
+\section{The Case for Cloud Inference}
 
+One thing worked in favor of moving the reasoning off-device. Since the
+environment was entirely synthetic from the start
+(Section~\ref{sec:fictional-geography}), the usual objection to sending
+data to a cloud-hosted model simply did not apply — there was no real
+subscriber data to protect. That removed the main reason to keep
+insisting on local inference, and made the switch a pragmatic step rather
+than a fraught one.
+
+Somewhere in the middle of babysitting local qwen3:8b through yet another
+sluggish response — close to five minutes for a single prompt to come
+back — the whole thing stopped feeling like an engineering trade-off and
+started feeling like a bad idea. Both GPU and CPU were pinned the entire
+time, since the model did not fit cleanly into 4~GB of VRAM and spilled
+over onto the CPU, which raised a more immediate concern than ``is this
+the right architecture'': at this rate, was this actually going to fry
+the machine?
+
+That is the point this got discussed with a colleague, who, on hearing
+``five minutes per prompt,'' asked the obvious question: why not just use
+something cloud-hosted instead?
+
+Before that conversation, a local-but-not-quite-local option was briefly
+on the table — spinning up a VM through Azure's student credit pack. That
+idea died fast: none of the free-tier images actually came with a GPU or
+VRAM attached, and getting one that did meant paying real money, which
+defeats the entire point of ``free'' hardware.
+
+The colleague's actual suggestion was AWS Bedrock~\cite{aws_bedrock},
+Amazon's managed access layer for foundation models. Signing up only asks for a card to
+confirm you are an actual person rather than a bot farming free credits.
+No charge, and it comes with somewhere in the \$100--\$200 range of usage
+credit (the exact figure depends on the offer running at the time). No
+local hardware to babysit, no card actually getting charged, and access
+to models far larger than anything a 4~GB GPU could ever load. That
+combination made the decision an easy one.
+
+% =====================================================================
+% SCREENSHOT NEEDED --- figures/ch3-bedrock-console.png
+% Where: AWS Console -> Bedrock -> Model access (or the Bedrock
+% playground/usage page).
+% What to capture: the list of enabled foundation models (qwen3-32b /
+% qwen3-next-80b-a3b should be visible as "Access granted"), ideally
+% with the free usage credit balance visible somewhere on the page too.
+% =====================================================================
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/ch3-bedrock-console.png}
+\caption{The AWS Bedrock console showing model access enabled for the
+models used in this project.}
+\label{fig:ch3-bedrock-console}
+\end{figure}
+
+\section{Cleaning Out the Local Stack}
+
+Once cloud inference was clearly the model going forward, the local-model
+code that had made up the entire agent up to this point turned into dead
+weight rather than a fallback worth keeping around. Out went the Ollama
+startup calls, the GPU-layer tuning, and the routing logic across
+whichever local model happened to be loaded at the time — all of it
+collapsed into a single ``call Bedrock'' path. The old code was not
+deleted outright; it was moved into the project's archive as a record of
+the experimentation rather than something expected to run again. The
+cleanup had a practical side effect too, beyond tidiness: the server
+itself started faster, since it no longer had to load a model into memory
+before it could serve a single request.
+
+\section{Making the Cloud Call Reliable}
+
+A local model either answers or it crashes. A network call to a shared
+API fails in a completely different way: throttling, timeouts, or the
+odd server-side hiccup that has nothing to do with the question being
+asked and everything to do with system load at that exact moment.
+Treating every one of those as a hard failure would have made the agent
+flaky in exactly the way switching to Bedrock was supposed to fix. So
+the Bedrock call got wrapped in a retry layer instead: on a transient
+error it backs off exponentially and tries again, up to four attempts,
+and only retries when nothing had already streamed back so a partial
+response never gets duplicated. Small piece of plumbing, but it is the
+difference between the agent occasionally failing for no visible reason
+and quietly recovering from the kind of hiccup any cloud API throws
+from time to time.
 
 \section*{Conclusion}
 
@@ -267,7 +349,19 @@ network/commercial line real operators use, populated with
 across a fictional geography. On top of that data, a first agent loop
 proved the core idea could work — but running it on a local 7B–8B model
 made clear that hardware was going to be the limiting factor, not the
-idea itself. The next chapter picks up exactly there.
+idea itself.
+
+That is what forced the second half of the chapter: the move off local
+inference entirely. An 8B model taking minutes per response and pinning
+both GPU and CPU was retired in favor of AWS Bedrock — tested first on
+qwen3-32b, settled into qwen3-next-80b-a3b as the model most of the
+project actually ran on, with 32B kept around for when speed mattered
+more. Once that direction was clear the old local-model code was cleaned
+out rather than kept as a fallback, and the API call itself was hardened
+against the transient failures any cloud service produces. Before getting
+into what the agent built on top of this call can actually do, the next
+chapter covers what it is actually working against — a database that
+never sits still.
 
 \addcontentsline{toc}{section}{Conclusion}
 

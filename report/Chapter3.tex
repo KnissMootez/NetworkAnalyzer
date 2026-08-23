@@ -1,333 +1,386 @@
-\chapter{A Living Database}\label{ch:livingdb}
+\chapter{Building the Foundation — Data and First Prototype}\label{chapter:BF-DFP}
+
 
 \section*{Introduction}
 \addcontentsline{toc}{section}{Introduction}
+After studying how SmartCare works and going through its documentation, one thing was immediately obvious --- this isn't a platform you can just plug into and start pulling data from. SmartCare is a commercial solution deployed across multiple Huawei customers worldwide, meaning any real data it holds is confidential by nature, and altering or accessing it directly would affect live operator environments. Not an option.
 
-Every chapter so far has treated the database as a fixed thing sitting
-underneath the agent: a schema to design, a set of tables to query. It
-never actually is one. From the first tick after the server starts, a
-separate process is quietly rewriting both databases underneath
-whatever the agent is doing --- shifting KPIs, opening and healing
-service incidents, accumulating usage, recomputing churn scores,
-occasionally creating a brand-new subscriber out of nowhere. The agent
-in the next chapter is built entirely around the assumption that this
-is true: that the world it is answering questions about is not sitting
-still, and that nothing it has already said can be trusted to still be
-correct a few minutes later. Before getting into what the agent can do
-with that world, this chapter covers what the world itself actually
-does on its own.
+So to ensure confidentiality while still building something realistic, we turned to the TM Forum framework --- the open industry standard that defines the data models and component architecture used across the telecom industry. SmartCare itself is a TM Forum ODA-certified product \cite{huawei_tmforum}, meaning its structure directly reflects that standard. Using TM Forum's component taxonomy \cite{tmforum_sid} as our blueprint, we designed a database that replicates the kind of data a platform like SmartCare would operate on, without relying on any proprietary or confidential information.
 
-\section{Why a Static Database Was Never Going to Be Enough}
+From there, we built two SQLite databases inspired by that taxonomy, populated with \(\sim\)50,000 synthetic subscribers. This is what the agent works on throughout the rest of the project.
 
-The synthetic databases described in Chapter
-\ref{chapter:BF-DFP} gave the project
-something to query, but a database that only changes when someone
-manually re-runs a generation script is still, for all practical
-purposes, a snapshot. A demo built on a snapshot has a specific and
-fairly embarrassing failure mode: ask the same question twice in a
-row, and if the assistant has quietly cached or half-remembered the
-first answer, the second answer had better still be correct --- except
-on a snapshot, ``correct'' never moves, so that guarantee is trivial
-and proves nothing. It does not test whether the agent is actually
-looking, only whether it can repeat itself.
 
-That is the real reason \texttt{db\_simulator.py} exists: not as a
-cosmetic touch to make the demo look more alive, but as a way of making
-staleness actually possible, so that avoiding it becomes a real,
-checkable property of the agent rather than an assumption nobody ever
-tested. If the numbers never change, an agent that silently memorizes
-its first answer and repeats it forever looks exactly as correct as one
-that queries the database honestly every single time. A moving target
-is the only way to actually tell the two apart.
 
-\section{The Tick Loop}
+\section{Database Design}\label{sec:db-design}
 
-\texttt{db\_simulator.py} runs as its own long-lived process, entirely
-separate from the chat server, and advances the environment forward on
-a fixed schedule --- one \emph{tick} every few minutes. Each tick walks
-through a set of update functions, and each one touches a different
-slice of the two databases:
+The data layer is split into two separate SQLite databases, each with a distinct responsibility --- a separation that mirrors the classic OSS/BSS divide in telecom architecture \cite{tmforum_sid}.
 
-\begin{itemize}
-    \item \textbf{KPIs and alarms} --- network performance metrics
-    (throughput, latency, drop rate) get nudged, faults get raised on
-    cells, and the two are wired to each other in both directions
-    (Figure~\ref{fig:ch4-alarms}).
-    \item \textbf{Usage} --- monthly data and voice usage accumulate
-    for a rotating sample of subscribers, the same way real usage
-    would build up gradually over the course of a billing month rather
-    than jumping straight to a final total.
-    \item \textbf{Churn rescoring} --- every affected subscriber's
-    churn risk gets recomputed against their latest activity, not
-    left stale from whenever it was last calculated.
-    \item \textbf{New subscribers} --- occasionally, a tick creates a
-    brand-new subscriber record from scratch, across both databases at
-    once, so the subscriber base itself is not a fixed 50{,}000-row
-    pool that only ever shrinks.
-    \item \textbf{The calendar} --- the simulator keeps its own notion
-    of ``today,'' and that notion advances tick by tick independently
-    of the real-world date. A month can complete and roll over inside
-    the simulation without the actual calendar moving at all.
-\end{itemize}
+The two databases are linked by a single key --- the \texttt{msisdn}, which is the subscriber's phone number. Every table on both sides that relates to a specific subscriber uses the \texttt{msisdn} as its identifier, making cross-database joins straightforward. This design keeps network and commercial data cleanly separated while still allowing the agent to query across both when needed --- for example, correlating a subscriber's poor QoE scores with their churn risk and current plan.
+
+The schema was designed to cover the main data domains that TM Forum's Information Framework defines for a telecom operator \cite{tmforum_sid}: resource and network management, service usage, customer and party management, billing, and product catalog.
+
+\subsection{Network Database}
+
+\texttt{NetworkAnalyzer\_new.db} covers everything on the network and operational side, organized into five groups:
+
+\textbf{Infrastructure} --- the physical layer. The \texttt{sites} table holds base station locations across 24 regions, and \texttt{cells} holds the individual radio cells attached to each site, with their technology generation (2G/3G/4G/5G) and frequency band.
+
+\textbf{Subscribers} --- the subscriber layer. The \texttt{subscribers} table holds core identity and location data. \texttt{subscriber\_technology} tracks each subscriber's current active technology and VoLTE status. \texttt{devices} holds device capability information --- whether the handset supports 5G, VoLTE, or Wi-Fi calling. \texttt{coverage} maps which cells a subscriber can reach from their home location.
+
+\textbf{KPIs} --- network performance. \texttt{kpis\_daily} holds per-cell daily averages for RSRP, SINR, throughput, drop rate, latency, and congestion level. \texttt{kpis\_hourly} provides finer granularity for intraday analysis.
+
+\textbf{Usage} --- what subscribers actually consume. \texttt{dou\_monthly} tracks total data usage per subscriber per month. \texttt{ott\_monthly} breaks that down by app category --- streaming, gaming, web, VoIP, and social --- alongside SMS count and voice minutes. \texttt{mobility\_profile} captures how many distinct cells a subscriber visits each month, their mobility class, and whether they are a Fixed Wireless Access (FWA) candidate. \texttt{roaming\_usage} tracks data and voice consumption abroad.
+
+\textbf{Quality of Experience} --- how the network feels to the end user. \texttt{qoe\_daily} holds per-subscriber daily experience scores per app type. \texttt{signal\_quality} tracks RSRP and SINR at the subscriber level. \texttt{streaming\_quality}, \texttt{web\_quality}, and \texttt{voip\_quality} hold monthly aggregated scores for each service type --- with VoIP entries only generated for subscribers on 4G with VoLTE active, or on 5G.
+
+\textbf{Operations} --- network events. \texttt{network\_alarms} and \texttt{network\_incidents} track cell-level faults and outages. \texttt{complaints} logs subscriber-reported issues, with categories that reflect the subscriber's technology tier. \texttt{nps\_scores} holds monthly Net Promoter Score submissions per subscriber.
+
+\subsection{Operator Database}
+
+\texttt{operator\_new.db} covers the commercial side, organized into three groups:
+
+\textbf{Customers} --- the commercial identity layer. The \texttt{customers} table holds subscriber profile data: name, demographics, region, and segment. \texttt{subscriptions} tracks which plan each subscriber is on and their contract type. \texttt{plans} defines the available offerings --- data caps, speeds, pricing, and flags for 5G, VoLTE, FWA, and MBB support.
+
+\textbf{Financials} --- revenue and risk. \texttt{billing} holds monthly invoices per subscriber, broken down into data and voice charges. \texttt{customer\_value} tracks ARPU and value segment (bronze, silver, gold, platinum) per subscriber per month, and also holds the churn risk score and churn label --- how those are computed, and why the approach changed, is covered in Chapter~\ref{ch:eval}.
+
+\textbf{Campaigns} --- commercial actions. \texttt{campaigns} defines operator-initiated outreach campaigns. \texttt{campaign\_targets} maps which subscribers are targeted by each campaign and tracks conversion. \texttt{offers} holds the actual commercial offers attached to campaigns. \texttt{offer\_assignments} tracks which offer was sent to which subscriber and whether it was accepted. \texttt{sms\_log} records every notification sent. \texttt{service\_interruptions} logs cases where a subscriber experienced a service outage, for correlation with churn and complaint analysis.
+
+\subsection{Schema Overview}
+
+Figure~\ref{fig:schema-overview}, on page~\pageref{fig:schema-overview},
+lays out both databases side by side, grouped the same way they were
+just described above: the network-side groups (Infrastructure,
+Subscribers, KPIs, Usage, Quality of Experience, Operations) on the
+left, and the commercial-side groups (Customers, Financials, Campaigns)
+on the right. The single connector between them is
+\texttt{msisdn} — every subscriber-linked table on either side carries it,
+which is what makes a cross-database question (``correlate this
+subscriber's QoE with their churn risk and current plan'') a plain join.
+
+Why does the left side of Figure~\ref{fig:schema-overview} have twice as
+many groups as the right? Not an accident. The network domain naturally
+produces far more distinct data grains --- per-cell, per-hour, per-app ---
+than the commercial side, which mostly reduces to who a customer is and
+what they have been billed or offered. That imbalance actually foreshadows
+a real design decision made later in the agent (Chapter
+\ref{ch:agent}): when a
+question touches both domains, the agent has to decide which side to
+query first, and that decision is a lot easier when the boundary is this
+visible from the start. The grouping here is not just illustrative either
+--- it is close to literally how the agent's own schema retriever
+organizes itself: every table gets tagged with its owning database, and
+that tag is what routes a question before a single query gets written.
+
+\begin{figure}[p]
+\centering
+\definecolor{netblue}{HTML}{4A6FA5}
+\definecolor{opbrown}{HTML}{B5793A}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  netgroup/.style={rectangle, rounded corners=3pt, draw=netblue, thick,
+    fill=netblue!6, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
+  opgroup/.style={rectangle, rounded corners=3pt, draw=opbrown, thick,
+    fill=opbrown!8, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
+]
+
+% ---- left column: NetworkAnalyzer_new.db ----
+\node[netgroup, name=g1] {\textbf{\normalsize Infrastructure}\\[3pt]
+  $\bullet$~\texttt{sites}\\ $\bullet$~\texttt{cells}};
+\node[netgroup, name=g2, below=5mm of g1] {\textbf{\normalsize Subscribers}\\[3pt]
+  $\bullet$~\texttt{subscribers}\\ $\bullet$~\texttt{subscriber\_technology}\\
+  $\bullet$~\texttt{devices}\\ $\bullet$~\texttt{coverage}};
+\node[netgroup, name=g3, below=5mm of g2] {\textbf{\normalsize KPIs}\\[3pt]
+  $\bullet$~\texttt{kpis\_daily}\\ $\bullet$~\texttt{kpis\_hourly}};
+\node[netgroup, name=g4, below=5mm of g3] {\textbf{\normalsize Usage}\\[3pt]
+  $\bullet$~\texttt{dou\_monthly}\\ $\bullet$~\texttt{ott\_monthly}\\
+  $\bullet$~\texttt{mobility\_profile}\\ $\bullet$~\texttt{roaming\_usage}};
+\node[netgroup, name=g5, below=5mm of g4] {\textbf{\normalsize Quality of Experience}\\[3pt]
+  $\bullet$~\texttt{qoe\_daily}\\ $\bullet$~\texttt{signal\_quality}\\
+  $\bullet$~\texttt{streaming\_quality}\\ $\bullet$~\texttt{web\_quality}\\
+  $\bullet$~\texttt{voip\_quality}};
+\node[netgroup, name=g6, below=5mm of g5] {\textbf{\normalsize Operations}\\[3pt]
+  $\bullet$~\texttt{network\_alarms}\\ $\bullet$~\texttt{network\_incidents}\\
+  $\bullet$~\texttt{complaints}\\ $\bullet$~\texttt{nps\_scores}};
+
+\node[draw=netblue, thick, rounded corners=6pt, fit=(g1)(g2)(g3)(g4)(g5)(g6),
+  inner sep=10pt,
+  label={[font=\bfseries, label distance=8pt]above:NetworkAnalyzer\_new.db\ (network domain)}]
+  (leftbox) {};
+
+% ---- right column: operator_new.db — Financials anchored to leftbox's ----
+% ---- vertical middle, Customers/Campaigns built up/down from there ----
+\node[opgroup, name=h2] at ($(leftbox.east)+(4.5cm,0)$)
+  {\textbf{\normalsize Financials}\\[3pt]
+  $\bullet$~\texttt{billing}\\ $\bullet$~\texttt{customer\_value}};
+\node[opgroup, name=h1, above=8mm of h2] {\textbf{\normalsize Customers}\\[3pt]
+  $\bullet$~\texttt{customers}\\ $\bullet$~\texttt{subscriptions}\\ $\bullet$~\texttt{plans}};
+\node[opgroup, name=h3, below=8mm of h2] {\textbf{\normalsize Campaigns}\\[3pt]
+  $\bullet$~\texttt{campaigns}\\ $\bullet$~\texttt{campaign\_targets}\\
+  $\bullet$~\texttt{offers}\\ $\bullet$~\texttt{offer\_assignments}\\
+  $\bullet$~\texttt{sms\_log}\\ $\bullet$~\texttt{service\_interruptions}};
+
+\node[draw=opbrown, thick, rounded corners=6pt, fit=(h1)(h2)(h3),
+  inner sep=10pt,
+  label={[font=\bfseries, label distance=8pt]above:operator\_new.db\ (commercial domain)}]
+  (rightbox) {};
+
+% ---- msisdn connector ----
+\draw[<->, thick] (leftbox.east) -- (rightbox.west);
+\node[fill=yellow!15, draw, rounded corners, align=center, font=\ttfamily\bfseries,
+  inner sep=5pt] at ($(leftbox.east)!0.5!(rightbox.west)$)
+  {msisdn\\ {\normalfont\itshape\footnotesize shared join key}};
+
+\end{tikzpicture}%
+}
+\caption{Schema overview: table groupings in each database, joined on \texttt{msisdn}.}
+\label{fig:schema-overview}
+\end{figure}
+
+\subsection{Design Rationale}
+
+A few choices behind the schema are worth calling out, since they shaped
+everything built on top of it later. First, SQLite: no server to stand up,
+a single portable file per database, and more than enough for \textasciitilde50{,}000
+subscribers — for a prototype at this scale, anything heavier would have
+been overkill.
+
+Second, the two-database split. It would have been simpler, technically,
+to dump everything into one file. But keeping network and commercial data
+apart mirrors the real OSS/BSS boundary operators actually work with, and
+it turned out to matter later: the agent needs to decide which domain a
+question belongs to before it can write a query, and having that boundary
+already baked into the data made that routing logic far more natural than
+if everything lived in one undifferentiated pile of tables.
+
+Third, the join key. Every subscriber-linked table on both sides uses a
+single \texttt{msisdn} column, with no foreign key constraints enforced.
+SQLite barely enforces them anyway, so nothing was really lost. The
+trade-off is deliberate: referential integrity becomes the generation
+code's job instead of the database's. Fine trade, since every row in
+this environment is written by scripts we control in the first place.
+
+
+\subsection{Confidentiality Through a Fictional Geography}\label{sec:fictional-geography}
+
+Even though the schema itself is grounded in TM Forum's real abstractions,
+none of the region, city, or site names in the data are real --- they are
+entirely invented. This was a deliberate choice, and it is worth being precise
+about why, because a reader encountering unfamiliar place names in an
+engineering report is entitled to ask whether they are a joke.
+
+Giving synthetic regions recognizable real-world names would create an
+association with an actual country or an actual Huawei customer network that
+simply is not there, and that is exactly the kind of confusion this project
+needed to avoid from day one. A file of invented subscribers living in real
+cities invites exactly the wrong question --- \emph{is this data from that
+operator?} --- and the answer being no is not much protection once a screenshot
+leaves the room.
+
+The alternative, naming regions \texttt{Region A} through \texttt{Region U},
+was considered and rejected for a specific reason: it is not memorable enough to
+be checked. Over a project this size the same regions are queried, charted and
+argued about hundreds of times, and distinguishable names make an inconsistency
+visible where indexed labels hide it. A subscriber in the wrong region is
+obvious when the regions have identities; it is invisible when they are letters.
+
+So every region, city, and site name in the data comes from one consistent
+invented world, which gives the environment a coherent identity while being
+unmistakable for any real operator's network. The names are arbitrary with
+respect to the engineering: nothing in the schema, the queries, or the results
+depends on them, and substituting a different naming scheme would change no
+result in this report. Figure~\ref{fig:ch2-fictional-data} shows what the
+invented geography looks like at scale.
 
 % =====================================================================
-% SCREENSHOT NEEDED --- figures/ch4-alarms.png
-% Where: analytics dashboard (localhost:8002), Network section.
-% What to capture: the KPI trend chart together with the active alarms
-% list/table, showing both a chart (built from kpis_daily) and a set of
-% currently-raised alarms in the same view.
+% SCREENSHOT NEEDED --- figures/ch2-fictional-data.png
+% Where: any SQLite browser (DB Browser for SQLite) open on
+% NetworkAnalyzer_new.db, OR the analytics dashboard's Subscribers
+% section (localhost:8002).
+% What to capture: a handful of rows from the subscribers table (or the
+% dashboard's subscriber list) with the region/city columns visible,
+% clearly showing the invented place names rather than real ones.
 % =====================================================================
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.85\textwidth]{figures/ch4-alarms.png}
-\caption{The analytics dashboard's network view: a KPI trend chart
-alongside the currently active alarms, both built from data the
-simulator is actively updating tick by tick.}
-\label{fig:ch4-alarms}
+\includegraphics[width=0.85\textwidth]{figures/ch2-fictional-data.png}
+\caption{The invented geography at scale: subscriber technology mix broken
+down by region, rendered from the live database. Every region name here is
+fictional, and an aggregate view like this one demonstrates the point better
+than a table of raw rows would --- the invented world is internally consistent
+across 50{,}000 subscribers, not merely plausible one record at a time.}
+\label{fig:ch2-fictional-data}
 \end{figure}
 
-None of these updates are dramatic on their own --- a KPI shifting by a
-few percentage points, one more alarm, a handful of subscribers with
-slightly higher usage. The point is not any single tick, it is that
-the process never stops. Ask the agent the same question an hour apart
-and there is a real chance the honest answer is a different number,
-which is exactly the property a demo running on a static snapshot could
-never have offered.
+\section{First Prototype: A Local Agent Loop}
 
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch4-simulator-tick.png
-% Where: terminal running db_simulator.py directly (python db_simulator.py).
-% What to capture: a few consecutive tick log lines showing the kind of
-% updates it applies each cycle (KPI updates, alarms, churn rescoring,
-% new-incident lines, etc.) --- enough to show it is a continuously
-% running process ticking forward, not a one-shot script.
-% =====================================================================
+With the databases in place, the next question was whether the actual
+idea — ask a question in plain English, get a SQL-backed answer — could
+work at all before worrying about making it fast or polished. The fastest
+way to find out was to wire up a minimal agent loop against a model
+running entirely locally, no cloud dependency, no API cost, nothing to
+wait on.
+\subsection{Getting a Loop Working}
+The first version ran on Ollama~\cite{ollama} with a local qwen
+model~\cite{qwen} — 7B, later bumped to 8B — driving a single-step
+reasoning loop built around plain text tags rather than anything
+structured: \ldots the model would read the question and respond with a \texttt{QUERY\_SC:} or \texttt{QUERY\_OP:}
+tag followed by raw SQL, the loop would run that query against the
+matching database, feed the result back, and repeat until the model
+wrote a \texttt{CONCLUDE:} tag with its final answer. No tool-calling
+API, no structured output — just a prompt format the model had to follow
+by convention, parsed back out with regular expressions on this end.
+
+The interface for this first version was a heavily customized Streamlit
+app (Figure~\ref{fig:streamlit-prototype}) — dark theme, custom fonts,
+a chat panel next to a live snapshot area for charts. It let every hour
+go toward the agent loop instead of frontend code, since Streamlit
+handles the layout and reactivity out of the box.
+
+Crude as it was, it proved the core idea worked: the model could turn a
+natural-language question into a real query against the schema from
+Section~\ref{sec:db-design}, chain a couple of query steps together when one was not
+enough, and land on something coherent. That was enough to justify
+continuing down this path — the tag-based format itself stuck around
+much longer than the local models did, and still shows up later in the
+report as the fallback path once tool-calling was introduced.
+
+But the same screenshot also shows the limitation head-on: the question
+asked for a drilldown tree of technologies used against terminal
+capability, and the agent answered with a dense block of raw counts
+instead — while the ``Live Snapshot'' panel next to it stayed completely
+empty. The reasoning loop could get the numbers right; turning those
+numbers into the visual the question actually asked for was a separate
+problem this first prototype had not solved yet.
 \begin{figure}[H]
-\centering
-\includegraphics[width=0.85\textwidth]{figures/ch4-simulator-tick.png}
-\caption{\texttt{db\_simulator.py} running its tick loop in a terminal,
-continuously updating both databases while the agent stays live against
-whatever the current tick has produced.}
-\label{fig:ch4-simulator}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/streamlit_prototype.png}
+    \caption{The first Streamlit prototype — a drilldown-tree question answered with raw counts and no chart, exposing the gap between correct data and a correct visualization.}
+    \label{fig:streamlit-prototype}
 \end{figure}
 
-\section{Live Service Incidents: Open, Spread, Heal}
 
-The most involved piece of the simulator is not a background metric
-drifting slightly --- it is a full incident lifecycle, built so the
-agent can be asked something like ``do we have any high-value
-customers having streaming issues right now'' and get a real, current,
-truthful answer.
+\subsection{Hitting the Hardware Ceiling}
 
-Every incident lives in a dedicated \texttt{experience\_incidents}
-table and carries a root cause, an affected service (video streaming,
-mobile data, voice calls, or all services), a severity, and a full
-timestamp trail: \texttt{started\_at}, an \texttt{expected\_}
-\texttt{resolution\_at} the simulator commits to when the incident
-opens, and a \texttt{resolved\_at} that only gets filled in once it
-actually heals. Nothing about an incident is a lone flag flipped on a
-row --- opening one lays down a coherent trail of evidence around it,
-consistent with a single cause: a run of poor quality-of-experience
-scores for the affected service, a matching service-interruption
-record, and, for anything serious enough, a customer complaint linked
-back to the same incident. Asking the agent to explain \emph{why} a
-customer's experience looks bad is meant to hold together as a story,
-not just a single suspicious number.
+What that first loop did not prove was that local inference was viable to
+actually use. It ran on an RTX 3050 with 4~GB of VRAM — enough to load a
+7B–8B model, but not enough headroom to serve it at a usable latency once
+the prompt included schema context and a few turns of conversation.
+Every step of the loop meant another full model call, and with local
+inference this slow, a question that should feel instant took long enough
+to make the whole point of the project — ``ask a question, get an
+answer'' — feel broken rather than fast. Bigger local models were an
+option in theory, but the same 4~GB ceiling that made 7B–8B slow was only
+going to make anything larger worse, not better. That hardware ceiling is
+what forced the next decision: whether to keep pushing on local models or
+move the reasoning off-device entirely.
 
-\subsection{Blast Radius: Not Every Fault Hits One Customer}
+\section{The Case for Cloud Inference}
 
-An early version of this feature made every incident purely
-per-customer, and it produced a result that did not survive a second
-look: a ``critical power failure at a site'' that supposedly affected
-exactly one subscriber, when that site was actually serving over fifty
-people. The fault itself was real and correctly reported by the agent
---- the problem was in the data, not the reasoning built on top of it,
-which is precisely why it is worth naming here rather than in the next
-chapter: it was a modeling gap in the simulator, not a mistake by the
-agent.
+One thing worked in favor of moving the reasoning off-device. Since the
+environment was entirely synthetic from the start
+(Section~\ref{sec:fictional-geography}), the usual objection to sending
+data to a cloud-hosted model simply did not apply — there was no real
+subscriber data to protect. That removed the main reason to keep
+insisting on local inference, and made the switch a pragmatic step rather
+than a fraught one.
 
-The fix was to give every incident a defined \emph{scope}, matching how
-that class of fault actually behaves in a real network:
+Somewhere in the middle of babysitting local qwen3:8b through yet another
+sluggish response — close to five minutes for a single prompt to come
+back — the whole thing stopped feeling like an engineering trade-off and
+started feeling like a bad idea. Both GPU and CPU were pinned the entire
+time, since the model did not fit cleanly into 4~GB of VRAM and spilled
+over onto the CPU, which raised a more immediate concern than ``is this
+the right architecture'': at this rate, was this actually going to fry
+the machine?
 
-\begin{itemize}
-    \item \textbf{Site-scoped} (power failure, site outage) ---
-    every active subscriber served by every cell on that site goes
-    down together. Rare by design (roughly 2\% of new incidents), since
-    a real outage at that scale is not a common event.
-    \item \textbf{Cell-scoped} (congestion, backhaul degradation,
-    signal interference) --- every active subscriber on that one cell
-    is affected. Deliberately weighted toward busier cells, since a
-    congestion event is naturally more likely to happen where there
-    are more people to congest.
-    \item \textbf{Subscriber-scoped} (throughput throttling, a DNS or
-    CDN hiccup, a dropped VoLTE bearer) --- exactly one customer,
-    biased toward high-value ones, the segment retention questions
-    actually care about. ``High-value'' here is not a fixed ARPU
-    threshold but the top decile of the live distribution, re-tested
-    whenever a subscriber's revenue moves --- so the label keeps
-    meaning something even as ARPU drifts.
-\end{itemize}
+That is the point this got discussed with a colleague, who, on hearing
+``five minutes per prompt,'' asked the obvious question: why not just use
+something cloud-hosted instead?
 
-Once a site- or cell-scoped incident fires, every subscriber caught in
-its blast radius gets a consistent snapshot of the incident attached to
-their record --- so a question filtered to high-value customers only
-returns the high-value customers genuinely inside that radius, not
-everyone the fault happened to touch. A power failure at a site serving
-mostly bronze-tier subscribers in a poorer part of the fictional map
-and one serving mostly platinum subscribers in a wealthier one are the
-same fault with completely different commercial urgency, which is
-exactly the distinction a purely per-customer model could never have
-produced.
+Before that conversation, a local-but-not-quite-local option was briefly
+on the table — spinning up a VM through Azure's student credit pack. That
+idea died fast: none of the free-tier images actually came with a GPU or
+VRAM attached, and getting one that did meant paying real money, which
+defeats the entire point of ``free'' hardware.
 
-\subsection{Self-Healing}
-
-An incident does not sit open forever. Every tick, a separate resolution
-pass checks every active incident against the \texttt{expected\_}
-\texttt{resolution\_at} timestamp it was given at open, and closes
-anything past due: status flips to resolved, \texttt{resolved\_at} gets
-stamped, and any linked complaint gets marked resolved too. The row
-itself is never deleted, so a question like ``what happened to this
-customer at 14:32 today'' still has a real answer to give hours or days
-later --- the incident heals, but the history of it having happened
-does not disappear with it.
-
-\section{Alarms That Actually Mean Something}
-
-The blast-radius problem had a sibling that hid for much longer. Alarms
-and KPIs both looked fine on their own --- the alarms table filled up,
-the KPI numbers moved --- so neither invited a second look. But they
-were never connected to each other. Each tick raised an alarm on a cell
-picked uniformly at random, wrote the row, and stopped there, while the
-KPI generator rolled its own separate dice and never read the alarms
-table. Two independent random processes, presented as one story about
-network health. The giveaway was in the data: cells carrying an active
-\emph{critical} alarm measured a slightly \emph{lower} drop rate than
-cells with no alarm at all --- an inverted correlation, which is what
-noise looks like when you go looking for a relationship that was never
-there. And since cells were picked from the whole network rather than
-the parts of it serving people, 62\% of alarms sat on cells with zero
-subscribers on them.
-
-Fixing it meant wiring the two together in both directions, because
-real faults work both ways. Equipment faults --- a power failure, a
-hardware fault, a backhaul link going down --- announce themselves, and
-the degraded counters follow as a consequence. Performance faults are
-the reverse: congestion, interference and coverage holes have no box to
-raise a flag, and the only way anyone finds out is by watching the
-counters cross a threshold, which is what a real network management
-system calls a threshold-crossing alert. So a raised fault now degrades
-the cell it sits on --- each fault type hitting the metric it would
-actually hit, scaled by severity --- and opens real incidents for the
-customers on that cell if it is serious enough, feeding the same
-evidence trail and churn coupling described above. Running the other
-way, a detector reads each cell-day and raises the alarm those numbers
-deserve.
-
-One detail there is worth keeping, because the obvious approach fails
-quietly. Thresholds have to be relative to the technology, never
-absolute: a 1.9\% drop rate is a broken 5G cell and a completely
-ordinary 2G one, so a flat ``drop rate above 2\%'' rule flags 182 2G
-cells, 48 3G cells, and not a single 4G or 5G one. It does not detect
-faults --- it rediscovers that 2G is 2G. Every threshold is therefore
-expressed against that technology's own healthy baseline.
-
-Worth admitting, since it explains how the whole thing went unnoticed:
-the KPI update function had never actually written a row. The table it
-writes to was missing a uniqueness constraint its upsert depended on,
-the database helper swallowed the resulting error, and the function
-went on reporting how many cells it had updated every tick regardless.
-A process that reports success while doing nothing is worse than one
-that crashes, and the helpers now print real errors instead of
-retrying past them. With that fixed and the coupling in place, cells
-under an active alarm run roughly twice the drop rate of clean cells
-within every technology --- and every active alarm sits on a cell that
-actually serves customers.
-
-
-\section{Churn Tracks the Live World, Not Just Usage}
-
-The project's churn model (a separately trained XGBoost~\cite{xgboost}
-classifier, balanced with SMOTE~\cite{smote} to handle the natural
-class imbalance in a churn dataset where most customers do not churn)
-produces a baseline risk score from a subscriber's usage trends ---
-falling recharge amounts, dropping data usage, that kind of signal. On
-its own, that baseline has no way of reacting to something happening to
-a customer \emph{today}. The live incident log is what closes that
-gap: every affected subscriber gets rescored the moment an incident
-opens against them, with a penalty added on top of the usage-based
-score, driven by how many active incidents, complaints, and service
-interruptions they have in the recent window. Once the incident heals,
-the next rescoring pass lets that penalty relax back down. A platinum
-subscriber sitting on a comfortable, low-risk baseline can be pushed
-into a genuinely elevated risk band for as long as their streaming
-service is actually degraded, and settle back down once it recovers ---
-churn risk that tracks the live state of the world, rather than a
-number computed once and left to go stale.
-
-\section{Seeing It on the Map}
-
-The coverage map inherited from Chapter
-\ref{chapter:BF-DFP}'s fictional-geography design
-is not just a static backdrop --- it reflects the incident log live.
-Sites with an active incident get a pulsing ring, colored and animated
-by severity, and the map can be switched into an ``issues only'' view
-that fades out everything healthy and shows exclusively the sites
-currently in trouble. Clicking a ring asks the agent directly to
-explain that incident and how to address it, which is a small detail
-but not a cosmetic one: it means the agent's answers about live issues
-and what the map is currently showing are always describing the exact
-same data, because both are reading off the same table at the moment
-the question is asked.
+The colleague's actual suggestion was AWS Bedrock~\cite{aws_bedrock},
+Amazon's managed access layer for foundation models. Signing up only asks for a card to
+confirm you are an actual person rather than a bot farming free credits.
+No charge, and it comes with somewhere in the \$100--\$200 range of usage
+credit (the exact figure depends on the offer running at the time). No
+local hardware to babysit, no card actually getting charged, and access
+to models far larger than anything a 4~GB GPU could ever load. That
+combination made the decision an easy one.
 
 % =====================================================================
-% SCREENSHOT NEEDED --- figures/ch4-map-flash.png
-% Where: chat UI (localhost:8000), Coverage tab in the snapshot panel.
-% What to capture: the map with at least one pulsing incident ring
-% visible, ideally with the hover tooltip open showing the site/service/
-% severity details. If you can catch the "Issues only" toggle active
-% too, even better --- otherwise a normal view with rings is enough.
+% SCREENSHOT NEEDED --- figures/ch3-bedrock-console.png
+% Where: AWS Console -> Bedrock -> Model access (or the Bedrock
+% playground/usage page).
+% What to capture: the list of enabled foundation models (qwen3-32b /
+% qwen3-next-80b-a3b should be visible as "Access granted"), ideally
+% with the free usage credit balance visible somewhere on the page too.
 % =====================================================================
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
-\includegraphics[width=0.85\textwidth]{figures/ch4-map-flash.png}
-\caption{The coverage map flashing a live incident, colored and pulsing
-by severity, driven directly by the active rows in
-\texttt{experience\_incidents}.}
-\label{fig:ch4-map-flash}
+\includegraphics[width=0.85\textwidth]{figures/ch3-bedrock-console.png}
+\caption{The AWS Bedrock console showing model access enabled for the
+models used in this project.}
+\label{fig:ch3-bedrock-console}
 \end{figure}
 
-\section{The Partial-Month Gotcha}
+\section{Cleaning Out the Local Stack}
 
-Because monthly usage figures accumulate tick by tick over the course
-of a simulated month rather than existing fully formed from day one,
-there is a real and slightly counterintuitive consequence worth naming
-directly: a question asked on the second day of a new simulated month
-legitimately returns a much smaller number than the exact same question
-asked on the last day of the previous one. Read in isolation, a ``top
-data user this month'' answer of a few gigabytes early in a cycle can
-look like the agent got it wrong, when it is in fact reporting a
-partial month correctly and honestly. This came up directly during
-testing: an answer citing a small usage figure for a specific
-subscriber looked, at first glance, like a fabricated number, until
-checking the live database confirmed it was exactly correct for how
-far into the month the simulation currently was. Knowing the data is
-genuinely live --- not stale, not wrong, just incomplete for the
-current period --- is what keeps a correct answer from being misread
-as a bug.
+Once cloud inference was clearly the model going forward, the local-model
+code that had made up the entire agent up to this point turned into dead
+weight rather than a fallback worth keeping around. Out went the Ollama
+startup calls, the GPU-layer tuning, and the routing logic across
+whichever local model happened to be loaded at the time — all of it
+collapsed into a single ``call Bedrock'' path. The old code was not
+deleted outright; it was moved into the project's archive as a record of
+the experimentation rather than something expected to run again. The
+cleanup had a practical side effect too, beyond tidiness: the server
+itself started faster, since it no longer had to load a model into memory
+before it could serve a single request.
+
+\section{Making the Cloud Call Reliable}
+
+A local model either answers or it crashes. A network call to a shared
+API fails in a completely different way: throttling, timeouts, or the
+odd server-side hiccup that has nothing to do with the question being
+asked and everything to do with system load at that exact moment.
+Treating every one of those as a hard failure would have made the agent
+flaky in exactly the way switching to Bedrock was supposed to fix. So
+the Bedrock call got wrapped in a retry layer instead: on a transient
+error it backs off exponentially and tries again, up to four attempts,
+and only retries when nothing had already streamed back so a partial
+response never gets duplicated. Small piece of plumbing, but it is the
+difference between the agent occasionally failing for no visible reason
+and quietly recovering from the kind of hiccup any cloud API throws
+from time to time.
 
 \section*{Conclusion}
+
+This chapter laid the foundation everything else in this report builds on:
+two SQLite databases, joined on \texttt{msisdn}, split along the same
+network/commercial line real operators use, populated with
+\textasciitilde50{,}000 synthetic but internally consistent subscribers
+across a fictional geography. On top of that data, a first agent loop
+proved the core idea could work — but running it on a local 7B–8B model
+made clear that hardware was going to be the limiting factor, not the
+idea itself.
+
+That is what forced the second half of the chapter: the move off local
+inference entirely. An 8B model taking minutes per response and pinning
+both GPU and CPU was retired in favor of AWS Bedrock — tested first on
+qwen3-32b, settled into qwen3-next-80b-a3b as the model most of the
+project actually ran on, with 32B kept around for when speed mattered
+more. Once that direction was clear the old local-model code was cleaned
+out rather than kept as a fallback, and the API call itself was hardened
+against the transient failures any cloud service produces. Before getting
+into what the agent built on top of this call can actually do, the next
+chapter covers what it is actually working against — a database that
+never sits still.
+
 \addcontentsline{toc}{section}{Conclusion}
 
-This chapter covered the piece of the project that everything else
-quietly depends on: a database that never actually holds still.
-\texttt{db\_simulator.py} advances KPIs, usage, and the subscriber base
-tick by tick, but the real weight of the chapter is the incident
-lifecycle built on top of it --- faults that open with a real cause, a
-proportionate blast radius instead of a flat per-customer model, and a
-resolution path that lets them heal on their own, all of it feeding
-directly into churn scoring and the live coverage map. None of this
-exists for its own sake. It exists so that the agent, covered in the
-next chapter, cannot get away with memorizing an answer and repeating
-it --- every claim it makes has to survive being checked against
-whatever the database currently says, because the database it is
-reading from is not the same one it was reading from five minutes ago.
+

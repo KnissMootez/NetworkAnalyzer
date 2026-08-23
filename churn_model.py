@@ -186,6 +186,150 @@ def train():
 
 # ── DB feature builder ────────────────────────────────────────────────────────
 
+
+# ── Heuristic churn scorecard ─────────────────────────────────────────────
+# Replaces the XGBoost model for scoring THIS environment. The model is trained on
+# an Indian prepaid recharge dataset and does not transfer: measured against the
+# features it is actually fed here, data_mb_m8 differs by ~300x (training median
+# 0 MB, ours ~40 GB), a recharge COUNT is mapped to a binary paid flag, and two of
+# the fifteen features are exact duplicates of two others. Its 0.88 AUC is real on
+# its own test set and says nothing about this data.
+#
+# Every term below is computed from the operator's own columns and is explainable
+# in one sentence, which matters more here than a black-box probability: the agent
+# can say WHY a subscriber is flagged, and a human can check it.
+CHURN_WEIGHTS = {
+    "arpu_decline":    0.35,   # spend falling against their own baseline
+    "unpaid":          0.20,   # bills going unpaid
+    "data_decline":    0.15,   # usage falling away
+    "voice_decline":   0.10,
+    "low_engagement":  0.10,   # few active days in the month
+    "short_tenure":    0.10,   # new subscribers churn more
+}
+# NOTE: complaints and live incidents are deliberately NOT scored here. The
+# experience penalty in db_simulator._rescore_churn already owns them, and
+# counting them twice would inflate exactly the customers the retention story
+# cares about. Clean split: this scorecard is COMMERCIAL signals, the penalty is
+# EXPERIENCE signals, and the two are added.
+
+
+def _decline(hist):
+    """Fractional drop of the latest period against the mean of the prior two,
+    clipped to 0..1. Only DROPS count -- growth is not negative churn risk."""
+    if not hist:
+        return 0.0
+    latest = hist[0] or 0
+    if len(hist) >= 3:
+        base = ((hist[1] or 0) + (hist[2] or 0)) / 2
+    elif len(hist) == 2:
+        base = hist[1] or 0
+    else:
+        return 0.0
+    if base <= 0:
+        return 0.0
+    return float(min(1.0, max(0.0, (base - latest) / base)))
+
+
+def heuristic_churn(arpu_hist=None, data_hist=None, voice_hist=None,
+                    paid_hist=None, days_active=None, tenure_days=None):
+    """Base churn risk in 0..1 from a subscriber's own history.
+
+    Deliberately NOT calibrated against observed churn -- the simulated world has
+    no ground-truth outcomes to calibrate against. This is a defensible ordering,
+    not a probability, and the report says so."""
+    w = CHURN_WEIGHTS
+    s = 0.0
+    s += w["arpu_decline"]  * _decline(arpu_hist or [])
+    s += w["data_decline"]  * _decline(data_hist or [])
+    s += w["voice_decline"] * _decline(voice_hist or [])
+
+    if paid_hist:                                   # 1 = paid, 0 = unpaid
+        s += w["unpaid"] * (1.0 - sum(paid_hist) / len(paid_hist))
+
+    if days_active is not None:                     # 30-day month
+        s += w["low_engagement"] * min(1.0, max(0.0, (30.0 - float(days_active)) / 30.0))
+
+    if tenure_days is not None:                     # risk decays over the first year
+        s += w["short_tenure"] * min(1.0, max(0.0, (365.0 - float(tenure_days)) / 365.0))
+
+    return float(min(1.0, max(0.0, s)))
+
+
+
+
+def score_all_heuristic(op_path=None, sc_path=None, write=True):
+    """Score every subscriber with the heuristic scorecard and rewrite
+    customer_value.churn_risk_score / churn_label for the current month.
+
+    Bands are percentiles of the heuristic's OWN distribution -- the thresholds
+    stored in churn_model.pkl were calibrated to the XGBoost output and mean
+    nothing here."""
+    import sqlite3 as _sq
+    from collections import defaultdict as _dd
+    from datetime import date as _date
+    op = _sq.connect(op_path or OP_DB); sc = _sq.connect(sc_path or NET_DB)
+    month = op.execute("SELECT MAX(month) FROM customer_value").fetchone()[0]
+
+    hist = lambda cn, sql: _collect(cn.execute(sql).fetchall())
+
+    def _collect(rows):
+        d = _dd(list)
+        for m, v in rows:
+            d[m].append(v or 0)
+        return d
+
+    # ARPU history comes from customer_value, NOT billing.total_amount. Billing
+    # amounts are drawn independently per month (measured month-to-month
+    # correlation +0.15), so a "decline against baseline" computed from them is
+    # noise. customer_value.arpu carries forward with drift (+0.998), which is
+    # what makes a trend term mean anything.
+    arpu  = _collect(op.execute(
+        "SELECT msisdn, arpu FROM customer_value ORDER BY msisdn, month DESC").fetchall())
+    paid  = _collect(op.execute(
+        "SELECT msisdn, CASE WHEN payment_status='paid' THEN 1 ELSE 0 END "
+        "FROM billing ORDER BY msisdn, billing_month DESC").fetchall())
+    data_ = _collect(sc.execute(
+        "SELECT msisdn, total_data_gb FROM dou_monthly ORDER BY msisdn, month DESC").fetchall())
+    voice = _collect(sc.execute(
+        "SELECT msisdn, voice_minutes FROM ott_monthly ORDER BY msisdn, month DESC").fetchall())
+    days  = dict(sc.execute(
+        "SELECT msisdn, days_active FROM dou_monthly WHERE month=(SELECT MAX(month) FROM dou_monthly)").fetchall())
+    today = _date.today()
+    tenure = {}
+    for m, act in sc.execute("SELECT msisdn, activation_date FROM subscribers").fetchall():
+        try:
+            tenure[m] = float(max(0, min(3650, (today - _date.fromisoformat(act)).days)))
+        except Exception:
+            tenure[m] = 365.0
+
+    msisdns = [r[0] for r in op.execute(
+        "SELECT msisdn FROM customer_value WHERE month=?", (month,)).fetchall()]
+    scores = {m: heuristic_churn(arpu.get(m, [])[:3], data_.get(m, [])[:3],
+                                 voice.get(m, [])[:3], paid.get(m, [])[:3],
+                                 days.get(m), tenure.get(m)) for m in msisdns}
+
+    vals = sorted(scores.values())
+    pick = lambda p: vals[min(len(vals) - 1, int(len(vals) * p / 100))] if vals else 0.0
+    p90, p70 = pick(90), pick(70)
+    label = lambda s: "high" if s >= p90 else "medium" if s >= p70 else "low"
+
+    print(f"[HEURISTIC] month={month}  scored {len(scores):,} subscribers")
+    print(f"[HEURISTIC] bands  high >= {p90:.4f}   medium >= {p70:.4f}")
+    dist = {"high": 0, "medium": 0, "low": 0}
+    for s in scores.values():
+        dist[label(s)] += 1
+    print(f"[HEURISTIC] distribution  {dist}")
+
+    if write:
+        op.executemany(
+            "UPDATE customer_value SET churn_risk_score=?, churn_label=? WHERE msisdn=? AND month=?",
+            [(round(s, 4), label(s), m, month) for m, s in scores.items()])
+        op.commit()
+        print("[HEURISTIC] customer_value updated")
+    op.close(); sc.close()
+    return p90, p70
+
+
 def build_db_features(op_conn, net_conn) -> pd.DataFrame:
     today = date.today()
 

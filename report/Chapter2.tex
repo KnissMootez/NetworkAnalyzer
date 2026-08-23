@@ -1,368 +1,162 @@
-\chapter{Building the Foundation — Data and First Prototype}\label{chapter:BF-DFP}
-
+\chapter{State of the Art and Related Work}\label{ch:related}
 
 \section*{Introduction}
 \addcontentsline{toc}{section}{Introduction}
-After studying how SmartCare works and going through its documentation, one thing was immediately obvious --- this isn't a platform you can just plug into and start pulling data from. SmartCare is a commercial solution deployed across multiple Huawei customers worldwide, meaning any real data it holds is confidential by nature, and altering or accessing it directly would affect live operator environments. Not an option.
 
-So to ensure confidentiality while still building something realistic, we turned to the TM Forum framework --- the open industry standard that defines the data models and component architecture used across the telecom industry. SmartCare itself is a TM Forum ODA-certified product \cite{huawei_tmforum}, meaning its structure directly reflects that standard. Using TM Forum's component taxonomy \cite{tmforum_sid} as our blueprint, we designed a database that replicates the kind of data a platform like SmartCare would operate on, without relying on any proprietary or confidential information.
+Asking a database a question in plain language is not a new idea, and neither is
+wrapping a language model in a loop so it can go and do things. What is a lot
+less settled is what happens when you put those two ideas together on top of
+operational data that keeps changing while you are querying it, and when the
+answers coming out are meant to drive commercial decisions about real customers.
+So where does this project actually sit? This chapter places the work against
+the research it borrows from, and is upfront about which parts are established
+technique and which parts are ours.
 
-From there, we built two SQLite databases inspired by that taxonomy, populated with \(\sim\)50,000 synthetic subscribers. This is what the agent works on throughout the rest of the project.
+\section{From Semantic Parsing to Text-to-SQL}
 
+The systems discussed throughout this chapter rest on the transformer
+architecture\cite{Attention} and on the observation that sufficiently large
+language models can perform tasks from a handful of in-context examples rather
+than task-specific training\cite{gpt3}, later sharpened by tuning models to
+follow instructions directly\cite{instructgpt}.
 
+Translating natural language into database queries has been studied for decades,
+but the modern framing dates to two benchmark datasets. WikiSQL~\cite{seq2sql}
+paired natural-language questions with SQL over single tables, and demonstrated
+that sequence-to-sequence models could learn the mapping directly.
+Spider~\cite{spider} raised the difficulty substantially by requiring queries
+that span multiple joined tables across databases the model has never seen, which
+made schema generalisation --- rather than sentence parsing --- the central
+problem.
 
-\section{Database Design}\label{sec:db-design}
+That shift matters a lot for this project. A system that memorises the mapping
+from question phrasing to query template becomes useless the moment the schema
+changes, and our environment changes continuously. The response in the research
+has been to hand the model the schema as context rather than baking it in as
+training data.
+General-purpose language models proved surprisingly capable at this without
+task-specific training~\cite{llm_text2sql_eval}, and systematic benchmarking has
+since mapped how prompt design, schema representation and example selection each
+move accuracy~\cite{dailsql}.
+DIN-SQL~\cite{dinsql} decomposes a hard question into simpler sub-problems and
+adds a self-correction pass, reporting that decomposition plus correction
+outperforms asking for the whole query in one shot.
 
-The data layer is split into two separate SQLite databases, each with a distinct responsibility --- a separation that mirrors the classic OSS/BSS divide in telecom architecture \cite{tmforum_sid}.
+Our agent follows that same principle without taking the method wholesale: it
+decomposes by taking one action at a time inside a loop rather than asking the
+model to plan out sub-queries, and its self-correction is a deterministic check
+against the real schema instead of another model call. The reasoning is
+something this report comes back to again and again --- a check the model
+performs is a check the model can decide to skip.
 
-The two databases are linked by a single key --- the \texttt{msisdn}, which is the subscriber's phone number. Every table on both sides that relates to a specific subscriber uses the \texttt{msisdn} as its identifier, making cross-database joins straightforward. This design keeps network and commercial data cleanly separated while still allowing the agent to query across both when needed --- for example, correlating a subscriber's poor QoE scores with their churn risk and current plan.
+\section{Language-Model Agents and Tool Use}
 
-The schema was designed to cover the main data domains that TM Forum's Information Framework defines for a telecom operator \cite{tmforum_sid}: resource and network management, service usage, customer and party management, billing, and product catalog.
+Chain-of-thought prompting~\cite{cot} established that eliciting intermediate
+reasoning improves performance on multi-step problems, but reasoning alone
+cannot consult a database. ReAct~\cite{react} closed that gap by interleaving
+reasoning steps with concrete actions against an external environment and
+feeding the observations back, which is precisely the cycle at the centre of
+Chapter~\ref{ch:agent}. Later work extended the pattern in two directions: searching over several
+candidate reasoning paths rather than committing to one~\cite{tot}, and having an
+agent critique its own previous attempt before retrying~\cite{reflexion}. Both are
+relevant to a loop that must recover from a query returning nothing.
+Toolformer~\cite{toolformer} approached the same problem
+from the other direction, training a model to decide for itself when to call an
+external tool.
 
-\subsection{Network Database}
+We use the ReAct pattern here with one significant practical difference. In the
+original version the model writes its action as text and the surrounding program
+parses it back out. Our first prototype did exactly that, and hit the predictable
+failure: nothing actually forces the model to respect that format, and a small
+drift in phrasing breaks the parse silently. Swapping that convention for a
+provider-validated tool-calling interface wiped out an entire class of failure
+without changing the loop at all --- which is a point about engineering rather
+than agent design, but it is the thing that decided whether the system worked.
 
-\texttt{NetworkAnalyzer\_new.db} covers everything on the network and operational side, organized into five groups:
+\section{Retrieval and Grounding}
 
-\textbf{Infrastructure} --- the physical layer. The \texttt{sites} table holds base station locations across 24 regions, and \texttt{cells} holds the individual radio cells attached to each site, with their technology generation (2G/3G/4G/5G) and frequency band.
+Retrieval-augmented generation~\cite{rag} established the general remedy for a
+model reasoning about knowledge it does not have: retrieve the relevant material
+and place it in context rather than relying on parameters. The technique is
+normally applied to document collections; here it is applied to schema and query
+knowledge, retrieving the subgraph of tables and join paths relevant to a
+question along with worked SQL examples.
 
-\textbf{Subscribers} --- the subscriber layer. The \texttt{subscribers} table holds core identity and location data. \texttt{subscriber\_technology} tracks each subscriber's current active technology and VoLTE status. \texttt{devices} holds device capability information --- whether the handset supports 5G, VoLTE, or Wi-Fi calling. \texttt{coverage} maps which cells a subscriber can reach from their home location.
+Retrieval quality rests on established components. BM25~\cite{bm25} provides
+lexical matching, which matters when a question names a column almost exactly,
+and dense retrieval provides the semantic half~\cite{dpr}, implemented here over
+sentence embeddings~\cite{sbert} indexed with FAISS~\cite{faiss} --- which matters
+when the question does not name the column at all. Combining both is standard practice, and this system does so.
 
-\textbf{KPIs} --- network performance. \texttt{kpis\_daily} holds per-cell daily averages for RSRP, SINR, throughput, drop rate, latency, and congestion level. \texttt{kpis\_hourly} provides finer granularity for intraday analysis.
+Where we depart from the retrieval literature is in what happens after
+generation. Retrieval lowers the chance of an ungrounded answer, but it does not
+detect one, and the tendency of these systems to produce fluent unsupported
+content is well documented\cite{hallucination_survey}. The verification layer in Chapter~\ref{ch:agent} --- checking that
+every cited number appears in the retrieved rows, and that every claim of absence
+has a query behind it --- is a post-hoc deterministic check rather than a
+retrieval improvement, and Chapter~\ref{ch:eval} shows both that it catches real
+failures and that it misses an entire class of them.
 
-\textbf{Usage} --- what subscribers actually consume. \texttt{dou\_monthly} tracks total data usage per subscriber per month. \texttt{ott\_monthly} breaks that down by app category --- streaming, gaming, web, VoIP, and social --- alongside SMS count and voice minutes. \texttt{mobility\_profile} captures how many distinct cells a subscriber visits each month, their mobility class, and whether they are a Fixed Wireless Access (FWA) candidate. \texttt{roaming\_usage} tracks data and voice consumption abroad.
+\section{Telecom Analytics and Customer Experience Management}
 
-\textbf{Quality of Experience} --- how the network feels to the end user. \texttt{qoe\_daily} holds per-subscriber daily experience scores per app type. \texttt{signal\_quality} tracks RSRP and SINR at the subscriber level. \texttt{streaming\_quality}, \texttt{web\_quality}, and \texttt{voip\_quality} hold monthly aggregated scores for each service type --- with VoIP entries only generated for subscribers on 4G with VoLTE active, or on 5G.
+The operational context is described by the TM~Forum Information
+Framework~\cite{tmforum_sid}, which defines the data domains an operator
+manages and the OSS/BSS separation the database design in
+Chapter~\ref{chapter:BF-DFP} mirrors. Commercial customer-experience platforms,
+including the SmartCare product this project was undertaken alongside, operate
+over exactly these domains, and their certification against TM~Forum's
+architecture~\cite{huawei_tmforum} is what made a faithful synthetic
+reconstruction possible without access to proprietary data.
 
-\textbf{Operations} --- network events. \texttt{network\_alarms} and \texttt{network\_incidents} track cell-level faults and outages. \texttt{complaints} logs subscriber-reported issues, with categories that reflect the subscriber's technology tier. \texttt{nps\_scores} holds monthly Net Promoter Score submissions per subscriber.
+Machine learning applied to churn prediction is long-established, and the
+gradient-boosting approach used here~\cite{xgboost} with minority-class
+oversampling~\cite{smote} is a conventional treatment of a heavily imbalanced
+target. The contribution of this report on that subject is negative and
+methodological rather than modelling: Chapter~\ref{ch:eval} documents what
+happens when such a model is transferred between subscriber populations without
+revalidation.
 
-\subsection{Operator Database}
+\section{Positioning}
 
-\texttt{operator\_new.db} covers the commercial side, organized into three groups:
+The decision to have the agent propose rather than act follows established
+guidance on human-AI interaction, which recommends making system capability
+clear and keeping consequential actions under user control\cite{humanai_guidelines}.
 
-\textbf{Customers} --- the commercial identity layer. The \texttt{customers} table holds subscriber profile data: name, demographics, region, and segment. \texttt{subscriptions} tracks which plan each subscriber is on and their contract type. \texttt{plans} defines the available offerings --- data caps, speeds, pricing, and flags for 5G, VoLTE, FWA, and MBB support.
+Three families of system are adjacent to this work. Benchmark text-to-SQL
+systems optimise query accuracy against static databases with fixed ground
+truth. General-purpose business-intelligence assistants translate questions over
+a warehouse a customer has configured. And operator-specific analytics platforms
+provide deep telecom insight through predefined dashboards rather than open
+questioning.
 
-\textbf{Financials} --- revenue and risk. \texttt{billing} holds monthly invoices per subscriber, broken down into data and voice charges. \texttt{customer\_value} tracks ARPU and value segment (bronze, silver, gold, platinum) per subscriber per month, and also holds the churn risk score and churn label computed by the machine learning model --- more on that in a later chapter.
-
-\textbf{Campaigns} --- commercial actions. \texttt{campaigns} defines operator-initiated outreach campaigns. \texttt{campaign\_targets} maps which subscribers are targeted by each campaign and tracks conversion. \texttt{offers} holds the actual commercial offers attached to campaigns. \texttt{offer\_assignments} tracks which offer was sent to which subscriber and whether it was accepted. \texttt{sms\_log} records every notification sent. \texttt{service\_interruptions} logs cases where a subscriber experienced a service outage, for correlation with churn and complaint analysis.
-
-\subsection{Schema Overview}
-
-Figure~\ref{fig:schema-overview}, on page~\pageref{fig:schema-overview},
-lays out both databases side by side, grouped the same way they were
-just described above: the network-side groups (Infrastructure,
-Subscribers, KPIs, Usage, Quality of Experience, Operations) on the
-left, and the commercial-side groups (Customers, Financials, Campaigns)
-on the right. The single connector between them is
-\texttt{msisdn} — every subscriber-linked table on either side carries it,
-which is what makes a cross-database question (``correlate this
-subscriber's QoE with their churn risk and current plan'') a plain join.
-
-Why does the left side of Figure~\ref{fig:schema-overview} have twice as
-many groups as the right? Not an accident. The network domain naturally
-produces far more distinct data grains --- per-cell, per-hour, per-app ---
-than the commercial side, which mostly reduces to who a customer is and
-what they have been billed or offered. That imbalance actually foreshadows
-a real design decision made later in the agent (Chapter\ref{ch:agent}): when a
-question touches both domains, the agent has to decide which side to
-query first, and that decision is a lot easier when the boundary is this
-visible from the start. The grouping here is not just illustrative either
---- it is close to literally how the agent's own schema retriever
-organizes itself: every table gets tagged with its owning database, and
-that tag is what routes a question before a single query gets written.
-
-\begin{figure}[p]
+\begin{table}[H]
 \centering
-\definecolor{netblue}{HTML}{4A6FA5}
-\definecolor{opbrown}{HTML}{B5793A}
-\resizebox{\textwidth}{!}{%
-\begin{tikzpicture}[
-  netgroup/.style={rectangle, rounded corners=3pt, draw=netblue, thick,
-    fill=netblue!6, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
-  opgroup/.style={rectangle, rounded corners=3pt, draw=opbrown, thick,
-    fill=opbrown!8, align=left, text width=5.4cm, inner sep=7pt, font=\footnotesize},
-]
+\begin{tabular}{lccc}
+\toprule
+\textbf{Capability} & \textbf{Text-to-SQL} & \textbf{BI assistants} & \textbf{This work} \\
+\midrule
+Natural-language querying      & Yes & Yes & Yes \\
+Cross-domain joins             & Yes & Partial & Yes \\
+Data that changes under it     & No  & Yes & Yes \\
+Domain-specific grounding      & No  & Partial & Yes \\
+Post-hoc answer verification   & No  & No & Yes \\
+Refuses under-specified questions & No & No & Yes \\
+Human approval before acting   & N/A & N/A & Yes \\
+Published accuracy measurement & Yes & Varies & Partial \\
+\bottomrule
+\end{tabular}
+\caption{Capability positioning. The final row is deliberate: benchmark systems
+report accuracy on standard datasets, and this work reports a measurement narrow
+enough that Chapter~\ref{ch:limits} argues against over-reading it.}
+\label{tab:positioning}
+\end{table}
 
-% ---- left column: NetworkAnalyzer_new.db ----
-\node[netgroup, name=g1] {\textbf{\normalsize Infrastructure}\\[3pt]
-  $\bullet$~\texttt{sites}\\ $\bullet$~\texttt{cells}};
-\node[netgroup, name=g2, below=5mm of g1] {\textbf{\normalsize Subscribers}\\[3pt]
-  $\bullet$~\texttt{subscribers}\\ $\bullet$~\texttt{subscriber\_technology}\\
-  $\bullet$~\texttt{devices}\\ $\bullet$~\texttt{coverage}};
-\node[netgroup, name=g3, below=5mm of g2] {\textbf{\normalsize KPIs}\\[3pt]
-  $\bullet$~\texttt{kpis\_daily}\\ $\bullet$~\texttt{kpis\_hourly}};
-\node[netgroup, name=g4, below=5mm of g3] {\textbf{\normalsize Usage}\\[3pt]
-  $\bullet$~\texttt{dou\_monthly}\\ $\bullet$~\texttt{ott\_monthly}\\
-  $\bullet$~\texttt{mobility\_profile}\\ $\bullet$~\texttt{roaming\_usage}};
-\node[netgroup, name=g5, below=5mm of g4] {\textbf{\normalsize Quality of Experience}\\[3pt]
-  $\bullet$~\texttt{qoe\_daily}\\ $\bullet$~\texttt{signal\_quality}\\
-  $\bullet$~\texttt{streaming\_quality}\\ $\bullet$~\texttt{web\_quality}\\
-  $\bullet$~\texttt{voip\_quality}};
-\node[netgroup, name=g6, below=5mm of g5] {\textbf{\normalsize Operations}\\[3pt]
-  $\bullet$~\texttt{network\_alarms}\\ $\bullet$~\texttt{network\_incidents}\\
-  $\bullet$~\texttt{complaints}\\ $\bullet$~\texttt{nps\_scores}};
-
-\node[draw=netblue, thick, rounded corners=6pt, fit=(g1)(g2)(g3)(g4)(g5)(g6),
-  inner sep=10pt,
-  label={[font=\bfseries, label distance=8pt]above:NetworkAnalyzer\_new.db\ (network domain)}]
-  (leftbox) {};
-
-% ---- right column: operator_new.db — Financials anchored to leftbox's ----
-% ---- vertical middle, Customers/Campaigns built up/down from there ----
-\node[opgroup, name=h2] at ($(leftbox.east)+(4.5cm,0)$)
-  {\textbf{\normalsize Financials}\\[3pt]
-  $\bullet$~\texttt{billing}\\ $\bullet$~\texttt{customer\_value}};
-\node[opgroup, name=h1, above=8mm of h2] {\textbf{\normalsize Customers}\\[3pt]
-  $\bullet$~\texttt{customers}\\ $\bullet$~\texttt{subscriptions}\\ $\bullet$~\texttt{plans}};
-\node[opgroup, name=h3, below=8mm of h2] {\textbf{\normalsize Campaigns}\\[3pt]
-  $\bullet$~\texttt{campaigns}\\ $\bullet$~\texttt{campaign\_targets}\\
-  $\bullet$~\texttt{offers}\\ $\bullet$~\texttt{offer\_assignments}\\
-  $\bullet$~\texttt{sms\_log}\\ $\bullet$~\texttt{service\_interruptions}};
-
-\node[draw=opbrown, thick, rounded corners=6pt, fit=(h1)(h2)(h3),
-  inner sep=10pt,
-  label={[font=\bfseries, label distance=8pt]above:operator\_new.db\ (commercial domain)}]
-  (rightbox) {};
-
-% ---- msisdn connector ----
-\draw[<->, thick] (leftbox.east) -- (rightbox.west);
-\node[fill=yellow!15, draw, rounded corners, align=center, font=\ttfamily\bfseries,
-  inner sep=5pt] at ($(leftbox.east)!0.5!(rightbox.west)$)
-  {msisdn\\ {\normalfont\itshape\footnotesize shared join key}};
-
-\end{tikzpicture}%
-}
-\caption{Schema overview: table groupings in each database, joined on \texttt{msisdn}.}
-\label{fig:schema-overview}
-\end{figure}
-
-\subsection{Design Rationale}
-
-A few choices behind the schema are worth calling out, since they shaped
-everything built on top of it later. First, SQLite: no server to stand up,
-a single portable file per database, and more than enough for \textasciitilde50{,}000
-subscribers — for a prototype at this scale, anything heavier would have
-been overkill.
-
-Second, the two-database split. It would have been simpler, technically,
-to dump everything into one file. But keeping network and commercial data
-apart mirrors the real OSS/BSS boundary operators actually work with, and
-it turned out to matter later: the agent needs to decide which domain a
-question belongs to before it can write a query, and having that boundary
-already baked into the data made that routing logic far more natural than
-if everything lived in one undifferentiated pile of tables.
-
-Third, the join key. Every subscriber-linked table on both sides uses a
-single \texttt{msisdn} column, with no foreign key constraints enforced.
-SQLite barely enforces them anyway, so nothing was really lost. The
-trade-off is deliberate: referential integrity becomes the generation
-code's job instead of the database's. Fine trade, since every row in
-this environment is written by scripts we control in the first place.
-
-
-\subsection{Confidentiality Through a Fictional Geography}\label{sec:fictional-geography}
-
-Even though the schema itself is grounded in TM Forum's real abstractions,
-none of the region, city, or site names in the data are real — they are
-entirely invented. This was a deliberate choice: giving synthetic regions
-recognizable real-world names would create an association with an actual
-country or an actual Huawei customer network that simply is not there, and
-that is exactly the kind of confusion this project needed to avoid from
-day one. Once the decision was made to invent a geography rather than
-borrow a real one, it made sense to commit to it properly rather than
-leave it half-fictional — so every region, city, and site name in the
-data comes from one consistent invented world, giving the whole
-environment a coherent identity without it being mistakable for any real
-operator's network. Figure~\ref{fig:ch2-fictional-data} shows what that
-actually looks like in the raw data — recognizably structured telecom
-records, with none of the geography being real.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch2-fictional-data.png
-% Where: any SQLite browser (DB Browser for SQLite) open on
-% NetworkAnalyzer_new.db, OR the analytics dashboard's Subscribers
-% section (localhost:8002).
-% What to capture: a handful of rows from the subscribers table (or the
-% dashboard's subscriber list) with the region/city columns visible,
-% clearly showing the invented place names rather than real ones.
-% =====================================================================
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.85\textwidth]{figures/ch2-fictional-data.png}
-\caption{A sample of subscriber records, showing the invented regions
-and cities used throughout the dataset instead of any real geography.}
-\label{fig:ch2-fictional-data}
-\end{figure}
-
-\section{First Prototype: A Local Agent Loop}
-
-With the databases in place, the next question was whether the actual
-idea — ask a question in plain English, get a SQL-backed answer — could
-work at all before worrying about making it fast or polished. The fastest
-way to find out was to wire up a minimal agent loop against a model
-running entirely locally, no cloud dependency, no API cost, nothing to
-wait on.
-\subsection{Getting a Loop Working}
-The first version ran on Ollama~\cite{ollama} with a local qwen
-model~\cite{qwen} — 7B, later bumped to 8B — driving a single-step
-reasoning loop built around plain text tags rather than anything
-structured: \ldots the model would read the question and respond with a \texttt{QUERY\_SC:} or \texttt{QUERY\_OP:}
-tag followed by raw SQL, the loop would run that query against the
-matching database, feed the result back, and repeat until the model
-wrote a \texttt{CONCLUDE:} tag with its final answer. No tool-calling
-API, no structured output — just a prompt format the model had to follow
-by convention, parsed back out with regular expressions on this end.
-
-The interface for this first version was a heavily customized Streamlit
-app (Figure~\ref{fig:streamlit-prototype}) — dark theme, custom fonts,
-a chat panel next to a live snapshot area for charts. It let every hour
-go toward the agent loop instead of frontend code, since Streamlit
-handles the layout and reactivity out of the box.
-
-Crude as it was, it proved the core idea worked: the model could turn a
-natural-language question into a real query against the schema from
-Section~\ref{sec:db-design}, chain a couple of query steps together when one was not
-enough, and land on something coherent. That was enough to justify
-continuing down this path — the tag-based format itself stuck around
-much longer than the local models did, and still shows up later in the
-report as the fallback path once tool-calling was introduced.
-
-But the same screenshot also shows the limitation head-on: the question
-asked for a drilldown tree of technologies used against terminal
-capability, and the agent answered with a dense block of raw counts
-instead — while the ``Live Snapshot'' panel next to it stayed completely
-empty. The reasoning loop could get the numbers right; turning those
-numbers into the visual the question actually asked for was a separate
-problem this first prototype had not solved yet.
-\begin{figure}[H]
-    \centering
-    \includegraphics[width=0.9\textwidth]{figures/streamlit_prototype.png}
-    \caption{The first Streamlit prototype — a drilldown-tree question answered with raw counts and no chart, exposing the gap between correct data and a correct visualization.}
-    \label{fig:streamlit-prototype}
-\end{figure}
-
-
-\subsection{Hitting the Hardware Ceiling}
-
-What that first loop did not prove was that local inference was viable to
-actually use. It ran on an RTX 3050 with 4~GB of VRAM — enough to load a
-7B–8B model, but not enough headroom to serve it at a usable latency once
-the prompt included schema context and a few turns of conversation.
-Every step of the loop meant another full model call, and with local
-inference this slow, a question that should feel instant took long enough
-to make the whole point of the project — ``ask a question, get an
-answer'' — feel broken rather than fast. Bigger local models were an
-option in theory, but the same 4~GB ceiling that made 7B–8B slow was only
-going to make anything larger worse, not better. That hardware ceiling is
-what forced the next decision: whether to keep pushing on local models or
-move the reasoning off-device entirely.
-
-\section{The Case for Cloud Inference}
-
-One thing worked in favor of moving the reasoning off-device. Since the
-environment was entirely synthetic from the start
-(Section~\ref{sec:fictional-geography}), the usual objection to sending
-data to a cloud-hosted model simply did not apply — there was no real
-subscriber data to protect. That removed the main reason to keep
-insisting on local inference, and made the switch a pragmatic step rather
-than a fraught one.
-
-Somewhere in the middle of babysitting local qwen3:8b through yet another
-sluggish response — close to five minutes for a single prompt to come
-back — the whole thing stopped feeling like an engineering trade-off and
-started feeling like a bad idea. Both GPU and CPU were pinned the entire
-time, since the model did not fit cleanly into 4~GB of VRAM and spilled
-over onto the CPU, which raised a more immediate concern than ``is this
-the right architecture'': at this rate, was this actually going to fry
-the machine?
-
-That is the point this got discussed with a colleague, who, on hearing
-``five minutes per prompt,'' asked the obvious question: why not just use
-something cloud-hosted instead?
-
-Before that conversation, a local-but-not-quite-local option was briefly
-on the table — spinning up a VM through Azure's student credit pack. That
-idea died fast: none of the free-tier images actually came with a GPU or
-VRAM attached, and getting one that did meant paying real money, which
-defeats the entire point of ``free'' hardware.
-
-The colleague's actual suggestion was AWS Bedrock~\cite{aws_bedrock},
-Amazon's managed access layer for foundation models. Signing up only asks for a card to
-confirm you are an actual person rather than a bot farming free credits.
-No charge, and it comes with somewhere in the \$100--\$200 range of usage
-credit (the exact figure depends on the offer running at the time). No
-local hardware to babysit, no card actually getting charged, and access
-to models far larger than anything a 4~GB GPU could ever load. That
-combination made the decision an easy one.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch3-bedrock-console.png
-% Where: AWS Console -> Bedrock -> Model access (or the Bedrock
-% playground/usage page).
-% What to capture: the list of enabled foundation models (qwen3-32b /
-% qwen3-next-80b-a3b should be visible as "Access granted"), ideally
-% with the free usage credit balance visible somewhere on the page too.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.85\textwidth]{figures/ch3-bedrock-console.png}
-\caption{The AWS Bedrock console showing model access enabled for the
-models used in this project.}
-\label{fig:ch3-bedrock-console}
-\end{figure}
-
-\section{Cleaning Out the Local Stack}
-
-Once cloud inference was clearly the model going forward, the local-model
-code that had made up the entire agent up to this point turned into dead
-weight rather than a fallback worth keeping around. Out went the Ollama
-startup calls, the GPU-layer tuning, and the routing logic across
-whichever local model happened to be loaded at the time — all of it
-collapsed into a single ``call Bedrock'' path. The old code was not
-deleted outright; it was moved into the project's archive as a record of
-the experimentation rather than something expected to run again. The
-cleanup had a practical side effect too, beyond tidiness: the server
-itself started faster, since it no longer had to load a model into memory
-before it could serve a single request.
-
-\section{Making the Cloud Call Reliable}
-
-A local model either answers or it crashes. A network call to a shared
-API fails in a completely different way: throttling, timeouts, or the
-odd server-side hiccup that has nothing to do with the question being
-asked and everything to do with system load at that exact moment.
-Treating every one of those as a hard failure would have made the agent
-flaky in exactly the way switching to Bedrock was supposed to fix. So
-the Bedrock call got wrapped in a retry layer instead: on a transient
-error it backs off exponentially and tries again, up to four attempts,
-and only retries when nothing had already streamed back so a partial
-response never gets duplicated. Small piece of plumbing, but it is the
-difference between the agent occasionally failing for no visible reason
-and quietly recovering from the kind of hiccup any cloud API throws
-from time to time.
-
-\section*{Conclusion}
-
-This chapter laid the foundation everything else in this report builds on:
-two SQLite databases, joined on \texttt{msisdn}, split along the same
-network/commercial line real operators use, populated with
-\textasciitilde50{,}000 synthetic but internally consistent subscribers
-across a fictional geography. On top of that data, a first agent loop
-proved the core idea could work — but running it on a local 7B–8B model
-made clear that hardware was going to be the limiting factor, not the
-idea itself.
-
-That is what forced the second half of the chapter: the move off local
-inference entirely. An 8B model taking minutes per response and pinning
-both GPU and CPU was retired in favor of AWS Bedrock — tested first on
-qwen3-32b, settled into qwen3-next-80b-a3b as the model most of the
-project actually ran on, with 32B kept around for when speed mattered
-more. Once that direction was clear the old local-model code was cleaned
-out rather than kept as a fallback, and the API call itself was hardened
-against the transient failures any cloud service produces. Before getting
-into what the agent built on top of this call can actually do, the next
-chapter covers what it is actually working against — a database that
-never sits still.
-
-\addcontentsline{toc}{section}{Conclusion}
-
-
+The gap we are addressing is the combination rather than any single capability
+on that list. Text-to-SQL research has mostly treated the database as static and
+the answer as the end of the job. Assistants built over warehouses inherit
+whatever grounding the warehouse already has and generally stop at reporting.
+The combination we went after --- an operational environment that never stops
+moving, a domain the agent is explicitly grounded in, verification applied to
+the answer after it has been written, and anything with real consequences routed
+to a human --- is what this report contributes, along with an honest account of
+where that combination still falls over.

@@ -4,16 +4,55 @@ Artificial Intelligence has advanced to a point where failing to leverage it —
 
 Today, a commercial manager who would want to identify upsell opportunities in a specific region, for instance 5G upsell, and how to approach this upsell campaign, would need to file a request to a data analyst in order to consult strategies and best in slot options. Accessing the data is rarely the bottleneck. Modern telecom operators have dashboards, BI tools, etc... The real issue is what comes after extracting said data, yes it would take time to get the right query in order to get exactly what the manager wants, but what takes even more time is making sense of it: raw metrics in isolation mean little; their value emerges only when contextualized/correlated, and interpreted across multiple dimensions simultaneously. A single anomaly in network performance could be insignificant on its own, might even just be an outlier — but viewed alongside subscriber complaint patterns, billing trends and geographic coverage gaps, that same anomaly can turn out to be the first sign of something worth acting on. Arriving at the right conclusion requires not just data access, but cross-domain expertise, time and collaborative analysis across multiple teams.
 
+Stated formally: given a telecom operator's OSS and BSS databases $D_{net}$ and $D_{com}$, and a natural-language question $q$ posed by a non-technical user, the problem is to produce an answer $A(q)$ that is correct with respect to the current state of those databases, delivered in interactive time, and where any action with operational consequence is proposed for human approval rather than executed autonomously.
+
 In response to this challenge, this project sets out to develop an AI-powered conversational assistant for telecom operators, capable of running queries quickly, and more importantly, correctly analyze and come up with solutions/suggestions/overview, reducing dependency on technical teams for day-to-day analytical tasks.
-The specific objectives are:
+The specific objectives, each stated with the criterion used to judge it:
 \begin{itemize}
-    \item Design a simulated telecom environment representative of a hypothetical operator's data structure
-    \item Build a natural language agent capable of multi-step SQL reasoning across multiple data domains (commercial and network)
-    \item Integrate a system that would help ground the agent's responses in domain knowledge
-    \item Enable the agent to execute multiple other operations, such as csv export and visual displays.
-    \item Keep that environment continuously live rather than a fixed snapshot, so the assistant is always answering against data that is actually moving
-    \item Keep a human in the loop for anything operational: the agent proposes an action, a person reviews it before it goes anywhere
+    \item \textbf{A representative simulated environment.} Two databases split along
+    the OSS/BSS line, schema derived from TM~Forum's Information Framework, populated
+    with $\sim$50{,}000 internally consistent subscribers and joinable on a single key.
+    \item \textbf{Multi-step natural-language reasoning across both domains.} The agent
+    chains more than one query when a single one cannot answer the question, and
+    inspects the real schema rather than guessing column names. Target: at least 80\%
+    correct on a golden set of factual questions with independently computed answers.
+    \item \textbf{Responses grounded in domain knowledge.} Every query is written
+    against the live schema through a knowledge graph and retrieval over worked
+    examples; answers citing numbers absent from the query results are rejected and
+    regenerated automatically.
+    \item \textbf{Operations beyond answering.} Charts, an interactive drill-down mind
+    map, a segment-to-strategy diagram, and CSV export available on eligible answers.
+    \item \textbf{A continuously live environment.} A simulator advances both databases
+    on a fixed tick rather than regenerating on demand, so no answer can be reused
+    without re-querying. Target: no data series more than one reporting cycle stale.
+    \item \textbf{Human approval for operational actions.} Every action with external
+    consequence is proposed, never executed. Target: zero autonomous executions on
+    adversarial prompts.
 \end{itemize}
+
+Chapter~\ref{ch:eval} reports the measured outcome against each of these criteria,
+including the ones that were not met.
+
+\subsection*{Contributions}
+
+The specific contributions of this work are:
+\begin{enumerate}
+    \item A dual-database synthetic telecom environment with a \emph{causally coupled}
+    simulator, in which a raised fault degrades its own cell's counters, propagates to
+    the customers that cell serves, and raises their churn risk until it heals ---
+    rather than each of those being an independent random process.
+    \item An agent architecture that combines structured tool-calling with
+    schema-graph retrieval and a deterministic post-hoc verification layer, so that
+    factual correctness is enforced by code rather than requested in a prompt.
+    \item A disambiguation mechanism that declines to answer an under-specified
+    question, offering concrete readings of it instead of silently choosing one.
+    \item A human-in-the-loop action pipeline in which the agent may propose an
+    operational action but never execute it.
+    \item An empirical observation that the failure modes of this system persist
+    across a substantial increase in model size, locating the remaining errors in the
+    retrieval and grounding layer rather than in model capacity --- with a measured
+    evaluation, including failures, reported rather than omitted.
+\end{enumerate}
 
 
 The project follows an empirical, iterative methodology — driven by experimentation and progressive refinement rather than a predefined specification. Approaches were selected, tested, and either validated or discarded based on observed results, making the development process as much a research exercise as an engineering one.
@@ -36,6 +75,10 @@ a tidy after-the-fact architecture.
 project sits in --- what SmartCare is, and why building against it directly was
 never an option.
 
+\textbf{Chapter~\ref{ch:related}} positions the work against existing research in
+text-to-SQL, language-model agents, and retrieval-based grounding, and is explicit
+about which parts of the design are established technique and which are not.
+
 \textbf{Chapter~\ref{chapter:BF-DFP}} lays the foundation: two synthetic databases
 modelled on TM Forum's abstractions, a first agent loop running on a local model
 to prove the idea works, and then the move to cloud inference once local hardware
@@ -48,5 +91,10 @@ assistant is always reading a target that never sits still.
 \textbf{Chapter~\ref{ch:agent}} covers the agent itself: the reasoning loop, how it
 grounds its queries in the real schema instead of guessing, how it catches its own
 mistakes before they reach the user, and everything it can do beyond answering in
-plain text --- charts, exports, and operational actions handed to a human for review.
+plain text.
 
+\textbf{Chapter~\ref{ch:eval}} measures all of it against a golden set, reports
+where it fails, and documents a churn model that was found not to transfer.
+
+\textbf{Chapter~\ref{ch:limits}} sets out what the system does not do, what that
+costs, and what would have to happen next.

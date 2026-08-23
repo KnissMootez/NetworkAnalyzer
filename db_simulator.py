@@ -25,19 +25,42 @@ SC_DB      = os.path.join(BASE_DIR, "NetworkAnalyzer_new.db")
 OP_DB      = os.path.join(BASE_DIR, "operator_new.db")
 MODEL_PATH = os.path.join(BASE_DIR, "churn_model.pkl")
 
-# Load churn model if available
+# Churn scoring: heuristic scorecard (see churn_model.heuristic_churn).
+# _churn_model is still loaded because other code paths check it as a
+# "scoring available" flag, but its predictions are no longer used --
+# the XGBoost model does not transfer to this environment.
 _churn_model = None
-_churn_p90   = 0.60
-_churn_p70   = 0.30
+_churn_p90   = 0.3761      # measured defaults; recalibrated from the live
+_churn_p70   = 0.2491      # distribution at startup, just below
 try:
     with open(MODEL_PATH, "rb") as _f:
-        _bundle    = pickle.load(_f)
-        _churn_model = _bundle["model"]
-        _churn_p90   = _bundle.get("p90", 0.60)
-        _churn_p70   = _bundle.get("p70", 0.30)
-    print(f"[SIM] Churn model loaded from {MODEL_PATH} (thresholds: high>={_churn_p90:.3f}, med>={_churn_p70:.3f})")
+        _churn_model = pickle.load(_f)["model"]
 except FileNotFoundError:
-    print(f"[SIM] No churn model found at {MODEL_PATH} — run churn_model.py first")
+    _churn_model = None
+
+def _calibrate_churn_bands():
+    """Read the band cutoffs off the live score distribution rather than off a
+    stored constant. The thresholds saved in the pickle were percentiles of the
+    XGBoost output and mean nothing for the scorecard; taking them from the data
+    keeps 'high' meaning 'top decile of this population' whatever the scoring
+    function is."""
+    global _churn_p90, _churn_p70
+    try:
+        _c = sqlite3.connect(f"file:{OP_DB}?mode=ro", uri=True)
+        vals = [r[0] for r in _c.execute(
+            "SELECT churn_risk_score FROM customer_value "
+            "WHERE month=(SELECT MAX(month) FROM customer_value) "
+            "AND churn_risk_score IS NOT NULL ORDER BY churn_risk_score")]
+        _c.close()
+        if len(vals) >= 100:
+            _churn_p90 = vals[int(len(vals) * 0.90)]
+            _churn_p70 = vals[int(len(vals) * 0.70)]
+    except Exception as _e:
+        print(f"[SIM] churn band calibration skipped: {_e}")
+
+_calibrate_churn_bands()
+print(f"[SIM] Churn scoring: heuristic scorecard "
+      f"(bands high>={_churn_p90:.4f}, medium>={_churn_p70:.4f})")
 
 # ═══════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -1296,11 +1319,19 @@ def _rescore_churn(msisdn_list, month, op_conn, sc_conn):
         WHERE msisdn IN ({placeholders})
         ORDER BY msisdn, billing_month DESC
     """, msisdn_list).fetchall()
-    arpu_hist  = defaultdict(list)
     maxrc_hist = defaultdict(list)
     for m, _, amt, dc in billing:
-        arpu_hist[m].append(amt or 0)
         maxrc_hist[m].append(dc or 0)
+
+    # ARPU trend from customer_value, not billing: billing amounts are independent
+    # per month (corr +0.15) so a decline computed from them is noise, while
+    # customer_value.arpu carries forward with drift (corr +0.998).
+    arpu_hist = defaultdict(list)
+    for m, _mo, a in op_conn.execute(f"""
+        SELECT msisdn, month, arpu FROM customer_value
+        WHERE msisdn IN ({placeholders}) ORDER BY msisdn, month DESC
+    """, msisdn_list).fetchall():
+        arpu_hist[m].append(a or 0)
 
     # Data usage + days_active last 3 months
     dou = sc_conn.execute(f"""
@@ -1380,8 +1411,18 @@ def _rescore_churn(msisdn_list, month, op_conn, sc_conn):
             tenure_map.get(msisdn, 365.0),     # tenure_days
         ])
 
-    X = np.array(rows, dtype=np.float32)
-    scores = _churn_model.predict_proba(X)[:, 1]
+    # Score with the heuristic scorecard, not the XGBoost model. The model is
+    # trained on Indian prepaid recharge behaviour and does not transfer to this
+    # postpaid environment -- see churn_model.heuristic_churn for the measured
+    # mismatch. `rows` above is still built because it documents which raw signals
+    # are gathered; the scorecard reads the same histories directly.
+    from churn_model import heuristic_churn as _hc
+    scores = [
+        _hc(arpu_hist.get(m, [])[:3], data_hist.get(m, [])[:3],
+            voice_hist.get(m, [])[:3], rech_hist.get(m, [])[:3],
+            days_map.get(m), tenure_map.get(m, 365.0))
+        for m in msisdn_list
+    ]
 
     # ── Experience penalty ──────────────────────────────────────────────
     # The usage model above ignores network experience. This penalty tracks the

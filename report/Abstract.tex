@@ -1,11 +1,64 @@
 \chapter*{Abstract}
 
-\par Write your English abstract here
+\par Telecom operators generate network performance metrics, subscriber behaviour data
+and commercial indicators continuously, but answering an operational question across
+those domains still requires a data analyst, a query, and time. This project addresses
+that gap by building an AI-powered conversational assistant that lets a non-technical
+operator ask a question in natural language and receive a correct, current, data-backed
+answer. The system is built on two SQLite databases modelled on TM~Forum abstractions
+and split along the OSS/BSS line, holding approximately 50{,}000 internally consistent
+synthetic subscribers, kept continuously in motion by a simulator that shifts KPIs,
+raises and clears faults, opens and heals service incidents, and re-scores churn. A
+reasoning agent running on AWS Bedrock answers questions against this moving target
+through structured tool calls, grounding every query in the real schema via a knowledge
+graph and hybrid retrieval, and verifying its own output before returning it. Any action
+with operational consequence is proposed rather than executed, and waits for human
+approval. Evaluation on a golden set of sixteen questions spanning factual retrieval,
+disambiguation, safety and hallucination resistance establishes both what works and
+where the system fails: the agent handles factual and safety cases reliably, but
+fabricates plausible values when asked for a metric the schema does not contain. An
+integrated XGBoost churn model, trained on 99{,}999 subscriber records with SMOTE
+balancing, reaches 0.93 accuracy and 0.88 AUC-ROC while recovering only 56\% of actual
+churners --- a gap reported here rather than hidden behind the headline figure. The
+principal contribution is not the assistant itself but the finding that correctness in
+such a system must be enforced by deterministic verification around the model rather
+than requested of it: identical failures appeared on a substantially larger model,
+locating the problem in the grounding layer rather than in model capacity.
 
-
-{\large \textbf{Keywords} : }Natural language processing, Artificial intelligence, Keyword, Keyword
+{\large \textbf{Keywords} : }Large Language Models, Conversational AI, Text-to-SQL,
+Retrieval-Augmented Generation, Telecom Network Analytics, OSS/BSS, Human-in-the-Loop
 
 \newpage
 \section*{Résumé}
- Résumé en français ... \\
- \textbf{Mots clés} : Traitement Automatique du Langage Naturel, Intelligence Artificielle, Mot clé, Mot clé
+\par Les opérateurs télécoms produisent en continu des indicateurs de performance
+réseau, des données de comportement abonné et des indicateurs commerciaux, mais
+répondre à une question opérationnelle couvrant ces domaines nécessite encore un
+analyste, une requête et du temps. Ce projet répond à ce besoin en construisant un
+assistant conversationnel basé sur l'intelligence artificielle, permettant à un
+opérateur non technique de poser une question en langage naturel et d'obtenir une
+réponse correcte, actuelle et fondée sur les données. Le système repose sur deux bases
+SQLite inspirées des abstractions TM~Forum et séparées selon la frontière OSS/BSS,
+contenant environ 50{,}000 abonnés synthétiques cohérents, maintenus en mouvement
+permanent par un simulateur qui fait évoluer les KPI, déclenche et résout des alarmes,
+ouvre et referme des incidents de service et recalcule le risque de résiliation. Un
+agent de raisonnement déployé sur AWS Bedrock répond aux questions sur cette cible
+mouvante au moyen d'appels d'outils structurés, en ancrant chaque requête dans le schéma
+réel via un graphe de connaissances et une recherche hybride, puis en vérifiant sa
+propre sortie avant de la restituer. Toute action à conséquence opérationnelle est
+proposée et non exécutée, et attend une validation humaine. Une évaluation sur un
+ensemble de référence de seize questions couvrant la recherche factuelle, la
+désambiguïsation, la sûreté et la résistance à l'hallucination établit à la fois ce qui
+fonctionne et ce qui échoue : l'agent traite de manière fiable les cas factuels et de
+sûreté, mais fabrique des valeurs plausibles lorsqu'on lui demande une métrique absente
+du schéma. Un modèle de résiliation XGBoost intégré, entraîné sur 99{,}999
+enregistrements avec rééquilibrage SMOTE, atteint 0,93 d'exactitude et 0,88 d'AUC-ROC
+tout en ne détectant que 56\% des résiliations réelles --- un écart rapporté ici plutôt
+que dissimulé derrière le chiffre global. La contribution principale n'est pas
+l'assistant lui-même mais le constat que la correction d'un tel système doit être
+imposée par une vérification déterministe autour du modèle plutôt que demandée à
+celui-ci : des défaillances identiques sont apparues sur un modèle nettement plus grand,
+situant le problème dans la couche d'ancrage et non dans la capacité du modèle.
+
+\textbf{Mots clés} : Grands Modèles de Langage, IA Conversationnelle, Text-to-SQL,
+Génération Augmentée par Récupération, Analyse de Réseaux Télécoms, OSS/BSS,
+Supervision Humaine

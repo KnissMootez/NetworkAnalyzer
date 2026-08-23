@@ -1,557 +1,342 @@
-\chapter{How the Agent Works}\label{ch:agent}
+\chapter{A Living Database}\label{ch:livingdb}
 
 \section*{Introduction}
 \addcontentsline{toc}{section}{Introduction}
 
-A capable model on its own does not solve the actual problem. Handed a
-question like ``which regions have upsell opportunity for 5G,'' qwen3
-cannot just answer. It does not know the schema, it cannot see the
-database, and even if it could write one correct query, plenty of real
-questions need more than one query chained together before there is
-enough to answer from. So what actually turns a single model call into
-something that can do that? The loop wrapped around it: read the
-question, decide on an action, observe what came back, and either take
-another action or conclude. And that loop is not new to this chapter ---
-it is the exact same idea the first local prototype in Chapter~\ref{chapter:BF-DFP} was
-already built around. What changed between then and now is not the
-architecture, it is how reliably the model's chosen action gets
-communicated back to the code running it. There is also a difference in
-what the loop is running against: the previous chapter established that
-the database underneath it never sits still, so everything the agent
-does here --- every query, every chart, every exported row --- is read
-against a target that is actively moving, not a fixed snapshot. This
-chapter covers how that loop actually works today, how it grounds
-itself in the real schema instead of guessing, how it catches its own
-mistakes before they reach the user, and everything it can do beyond
-just answering in text.
+Every chapter so far has treated the database as a fixed thing sitting
+underneath the agent: a schema to design, a set of tables to query. It
+never actually is one. From the first tick after the server starts, a
+separate process is quietly rewriting both databases underneath
+whatever the agent is doing --- shifting KPIs, opening and healing
+service incidents, accumulating usage, recomputing churn scores,
+occasionally creating a brand-new subscriber out of nowhere. The agent
+in the next chapter is built entirely around the assumption that this
+is true: that the world it is answering questions about is not sitting
+still, and that nothing it has already said can be trusted to still be
+correct a few minutes later. Before getting into what the agent can do
+with that world, this chapter covers what the world itself actually
+does on its own.
 
-\section{The Loop: One Consistent Idea, Two Implementations}
+\section{Why a Static Database Was Never Going to Be Enough}
 
-Strip away everything specific to Bedrock or tool-calling, and the
-agent's architecture is the same simple cycle it has been since
-Chapter~\ref{chapter:BF-DFP}: \emph{perceive, decide, act, observe, repeat} --- read the
-question and whatever has been learned so far, decide on exactly one
-action, take it, look at what came back, and either take another action
-or conclude with a final answer. This is the same reason-act-observe
-pattern behind the ReAct approach to language-model agents~\cite{react}:
-interleaving reasoning steps with concrete actions against the outside
-world, rather than asking the model to reason its way to an answer in
-one shot. Figure~\ref{fig:agent-loop} shows this cycle as it runs today.
+The synthetic databases described in Chapter
+\ref{chapter:BF-DFP} gave the project
+something to query, but a database that only changes when someone
+manually re-runs a generation script is still, for all practical
+purposes, a snapshot. A demo built on a snapshot has a specific and
+fairly embarrassing failure mode: ask the same question twice in a
+row, and if the assistant has quietly cached or half-remembered the
+first answer, the second answer had better still be correct --- except
+on a snapshot, ``correct'' never moves, so that guarantee is trivial
+and proves nothing. It does not test whether the agent is actually
+looking, only whether it can repeat itself.
 
-What actually changed between the local Ollama prototype and the
-current agent is not this cycle, but how an ``action'' gets expressed
-and recognized. In Chapter~\ref{chapter:BF-DFP}, the model wrote a plain-text tag ---
-\texttt{QUERY\_SC:}, \texttt{QUERY\_OP:}, or \texttt{CONCLUDE:} ---
-followed by whatever it wanted to run or say, and the code on this end
-parsed it back out with regular expressions. It worked, but nothing
-forced the model to actually follow that format, and when it drifted
-from it even slightly, the step failed silently and the loop had no
-clean way to recover.
+That is the real reason \texttt{db\_simulator.py} exists: not as a
+cosmetic touch to make the demo look more alive, but as a way of making
+staleness actually possible, so that avoiding it becomes a real,
+checkable property of the agent rather than an assumption nobody ever
+tested. If the numbers never change, an agent that silently memorizes
+its first answer and repeats it forever looks exactly as correct as one
+that queries the database honestly every single time. A moving target
+is the only way to actually tell the two apart.
 
-Bedrock's tool-calling interface replaced that free-text convention
-with something the model is structurally constrained to follow: a
-fixed set of callable tools, each with a defined input shape, that the
-API itself validates before the loop ever sees them:
+\section{The Tick Loop}
+
+\texttt{db\_simulator.py} runs as its own long-lived process, entirely
+separate from the chat server, and advances the environment forward on
+a fixed schedule --- one \emph{tick} every few minutes. Each tick walks
+through a set of update functions, and each one touches a different
+slice of the two databases:
 
 \begin{itemize}
-    \item \texttt{run\_sql(database, query)} --- execute a SQL query
-    against the network or commercial database and return the rows.
-    \item \texttt{inspect\_schema(table)} --- look up the real columns
-    of a table before writing a query against it, rather than guessing.
-    \item \texttt{conclude(text, recommendations, chart, ...)} --- end
-    the loop with a final answer, optionally attaching a chart,
-    recommendations, or a visualization spec.
-    \item \texttt{propose\_action(description)} --- instead of
-    answering, propose an operational action (a campaign, an SMS, a
-    network flag) for a human to review, rather than taking it directly.
+    \item \textbf{KPIs and alarms} --- network performance metrics
+    (throughput, latency, drop rate) get nudged, faults get raised on
+    cells, and the two are wired to each other in both directions
+    (Figure~\ref{fig:ch4-alarms}).
+    \item \textbf{Usage} --- monthly data and voice usage accumulate
+    for a rotating sample of subscribers, the same way real usage
+    would build up gradually over the course of a billing month rather
+    than jumping straight to a final total.
+    \item \textbf{Churn rescoring} --- every affected subscriber's
+    churn risk gets recomputed against their latest activity, not
+    left stale from whenever it was last calculated.
+    \item \textbf{New subscribers} --- occasionally, a tick creates a
+    brand-new subscriber record from scratch, across both databases at
+    once, so the subscriber base itself is not a fixed 50{,}000-row
+    pool that only ever shrinks.
+    \item \textbf{The calendar} --- the simulator keeps its own notion
+    of ``today,'' and that notion advances tick by tick independently
+    of the real-world date. A month can complete and roll over inside
+    the simulation without the actual calendar moving at all.
 \end{itemize}
 
-The loop itself did not need to change to adopt this --- it still asks
-``what is the next action,'' takes it, and observes the result. What
-changed is that ``the next action'' is now a structured tool call
-instead of a string that has to be hoped for and parsed, which is what
-makes the whole system meaningfully more reliable than the Chapter~\ref{chapter:BF-DFP}
-version, not a difference in the underlying idea.
-
+% =====================================================================
+% SCREENSHOT NEEDED --- figures/ch4-alarms.png
+% Where: analytics dashboard (localhost:8002), Network section.
+% What to capture: the KPI trend chart together with the active alarms
+% list/table, showing both a chart (built from kpis_daily) and a set of
+% currently-raised alarms in the same view.
+% =====================================================================
 \begin{figure}[H]
 \centering
-\definecolor{agentblue}{HTML}{4A6FA5}
-\definecolor{toolgray}{HTML}{6B7280}
-\definecolor{concgreen}{HTML}{2E8B57}
-\definecolor{actamber}{HTML}{B5793A}
-\resizebox{\textwidth}{!}{%
-\begin{tikzpicture}[
-  qbox/.style={rectangle, rounded corners=3pt, draw=black!60, thick,
-    fill=black!4, align=center, text width=4.4cm, inner sep=8pt, font=\footnotesize},
-  agentbox/.style={rectangle, rounded corners=4pt, draw=agentblue, very thick,
-    fill=agentblue!10, align=center, text width=5.6cm, inner sep=10pt, font=\bfseries\footnotesize},
-  toolbox/.style={rectangle, rounded corners=3pt, draw=toolgray, thick,
-    fill=toolgray!8, align=center, text width=4.6cm, inner sep=7pt, font=\footnotesize\ttfamily},
-  obsbox/.style={rectangle, rounded corners=3pt, draw=toolgray, thick,
-    fill=toolgray!15, align=center, text width=6.2cm, inner sep=7pt, font=\footnotesize},
-  concbox/.style={rectangle, rounded corners=3pt, draw=concgreen, thick,
-    fill=concgreen!10, align=center, text width=4.6cm, inner sep=7pt, font=\footnotesize\ttfamily},
-  ansbox/.style={rectangle, rounded corners=3pt, draw=concgreen, very thick,
-    fill=concgreen!18, align=center, text width=4.6cm, inner sep=8pt, font=\bfseries\footnotesize},
-  actbox/.style={rectangle, rounded corners=3pt, draw=actamber, thick,
-    fill=actamber!12, align=center, text width=4.6cm, inner sep=7pt, font=\footnotesize\ttfamily},
-  humbox/.style={rectangle, rounded corners=3pt, draw=actamber, very thick,
-    fill=actamber!20, align=center, text width=4.6cm, inner sep=8pt, font=\bfseries\footnotesize},
-  lbl/.style={font=\scriptsize\itshape, align=center},
-]
-
-\node[qbox] (q) {User Question\\[2pt]\normalfont\scriptsize (plus anything already learned this turn)};
-\node[agentbox, below=9mm of q] (agent) {Agent\\[2pt]\normalfont\footnotesize reasons over the question and decides exactly one next action};
-
-\node[toolbox, below=16mm of agent, xshift=-6.2cm] (runsql) {run\_sql(\allowbreak database,\allowbreak query)};
-\node[toolbox, right=8mm of runsql] (inspect) {inspect\_schema(\allowbreak table)};
-\node[obsbox, below=8mm of $(runsql.south)!0.5!(inspect.south)$] (observe) {Observe: query results, or the real columns of a table};
-
-\node[concbox, below=16mm of agent, xshift=6.2cm] (conclude) {conclude(\allowbreak text,\allowbreak chart,\allowbreak ...)};
-\node[actbox, right=8mm of conclude] (propose) {propose\_action(\allowbreak description)};
-\node[ansbox, below=8mm of conclude] (answer) {Final Answer\\[2pt]\normalfont\footnotesize shown to the user};
-\node[humbox, below=8mm of propose] (human) {Human Review\\[2pt]\normalfont\footnotesize (Ops Portal)};
-
-% forward flow
-\draw[-{Latex[length=2.5mm]}, thick] (q) -- (agent);
-\draw[-{Latex[length=2.5mm]}, thick] (agent.south) -- ++(0,-4mm) -| (runsql.north);
-\draw[-{Latex[length=2.5mm]}, thick] (agent.south) -- ++(0,-4mm) -| (inspect.north);
-\draw[-{Latex[length=2.5mm]}, thick] (runsql.south) -- (observe.north -| runsql.south);
-\draw[-{Latex[length=2.5mm]}, thick] (inspect.south) -- (observe.north -| inspect.south);
-\draw[-{Latex[length=2.5mm]}, thick] (agent.south) -- ++(0,-4mm) -| (conclude.north);
-\draw[-{Latex[length=2.5mm]}, thick] (agent.south) -- ++(0,-4mm) -| (propose.north);
-\draw[-{Latex[length=2.5mm]}, thick] (conclude) -- (answer);
-\draw[-{Latex[length=2.5mm]}, thick] (propose) -- (human);
-
-% the loop-back — this is the actual cycle
-\draw[-{Latex[length=2.5mm]}, thick, agentblue]
-  (observe.west) to[out=180, in=270] node[lbl, agentblue, xshift=-2mm] {repeat until\\ready to conclude}
-  ++(-2.6cm, 1.8cm) |- (agent.west);
-
-\end{tikzpicture}%
-}
-\caption{The agent's reasoning loop. The model chooses exactly one
-tool call per step; \texttt{run\_sql} and \texttt{inspect\_schema}
-feed their results back into another round of reasoning, while
-\texttt{conclude} and \texttt{propose\_action} end the loop. This is
-the same perceive-decide-act-observe cycle the local prototype in
-Chapter~\ref{chapter:BF-DFP} used --- only the mechanism for expressing ``the next
-action'' changed.}
-\label{fig:agent-loop}
+\includegraphics[width=0.85\textwidth]{figures/ch4-alarms.png}
+\caption{The analytics dashboard's network view, built from data the simulator
+is actively updating tick by tick. Alarms are shown as a \emph{rate} --- active alarms
+per 100 cells --- because a raw count simply ranks regions by how many cells they
+have: Ba Sing Se holds a fifth of the network and tops any count chart by
+construction. Normalized, the least healthy region is Omashu. Regions above the
+network-wide rate are highlighted; hovering any bar gives the underlying counts.}
+\label{fig:ch4-alarms}
 \end{figure}
 
-Figure~\ref{fig:agent-loop} is the theory. Figure~\ref{fig:ch5-steps-panel}
-is what it actually looks like when the loop runs against a real
-question --- every \texttt{run\_sql} step gets logged and shown to the
-user, so the loop is not a black box even though the reasoning behind
-each step is not shown in full.
+None of these updates are dramatic on their own --- a KPI shifting by a
+few percentage points, one more alarm, a handful of subscribers with
+slightly higher usage. The point is not any single tick, it is that
+the process never stops. Ask the agent the same question an hour apart
+and there is a real chance the honest answer is a different number,
+which is exactly the property a demo running on a static snapshot could
+never have offered.
 
 % =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-steps-panel.png
-% Where: chat UI (localhost:8000), Copilot tab.
-% What to capture: ask a multi-step question that needs more than one
-% query to answer (something like "5G upsell opportunities by region" or
-% any drilldown/breakdown question) and expand the "steps" panel under
-% the finished answer BEFORE it collapses. Should show at least 2 SQL
-% step entries logged one after another (i.e. two loop iterations),
-% ideally with the elapsed time indicator visible too.
+% SCREENSHOT NEEDED --- figures/ch4-simulator-tick.png
+% Where: terminal running db_simulator.py directly (python db_simulator.py).
+% What to capture: a few consecutive tick log lines showing the kind of
+% updates it applies each cycle (KPI updates, alarms, churn rescoring,
+% new-incident lines, etc.) --- enough to show it is a continuously
+% running process ticking forward, not a one-shot script.
 % =====================================================================
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-steps-panel.png}
-\caption{The steps panel expanded under a finished answer, showing two
-consecutive \texttt{run\_sql} iterations of the loop from
-Figure~\ref{fig:agent-loop} before the model called \texttt{conclude}.}
-\label{fig:ch5-steps-panel}
+\includegraphics[width=0.85\textwidth]{figures/ch4-simulator-tick.png}
+\caption{\texttt{db\_simulator.py} running its tick loop in a terminal,
+continuously updating both databases while the agent stays live against
+whatever the current tick has produced.}
+\label{fig:ch4-simulator}
 \end{figure}
 
-\section{Knowing When Not to Answer Yet}
+\section{Live Service Incidents: Open, Spread, Heal}
 
-The first decision the loop makes is not which query to run. It is whether
-the question can be answered honestly as asked.
+The most involved piece of the simulator is not a background metric
+drifting slightly --- it is a full incident lifecycle, built so the
+agent can be asked something like ``do we have any high-value
+customers having streaming issues right now'' and get a real, current,
+truthful answer.
 
-Take a question the dashboard gets constantly: ``5G upsell opportunities
-by region.'' That sounds specific enough. It is not. Does it mean every
-subscriber holding a 5G-capable handset who is still on a 4G plan? Only
-the high-value ones, because a campaign budget is finite? Only the ones
-who are also showing churn risk, because those are the ones worth
-spending a retention offer on? Those are three different lists, three
-different campaigns, and three different costs. An agent that quietly
-picks one and answers looks confident and is probably answering a
-question nobody asked --- and, worse, the answer gives no clue which
-reading it used.
+Every incident lives in a dedicated \texttt{experience\_incidents}
+table and carries a root cause, an affected service (video streaming,
+mobile data, voice calls, or all services), a severity, and a full
+timestamp trail: \texttt{started\_at}, an \texttt{expected\_}
+\texttt{resolution\_at} the simulator commits to when the incident
+opens, and a \texttt{resolved\_at} that only gets filled in once it
+actually heals. Nothing about an incident is a lone flag flipped on a
+row --- opening one lays down a coherent trail of evidence around it,
+consistent with a single cause: a run of poor quality-of-experience
+scores for the affected service, a matching service-interruption
+record, and, for anything serious enough, a customer complaint linked
+back to the same incident. Asking the agent to explain \emph{why} a
+customer's experience looks bad is meant to hold together as a story,
+not just a single suspicious number.
 
-So before running anything, the agent checks whether it should ask first.
-Three gates, cheapest first, and most questions pass straight through all
-three without paying for any of them:
+\subsection{Blast Radius: Not Every Fault Hits One Customer}
+
+An early version of this feature made every incident purely
+per-customer, and it produced a result that did not survive a second
+look: a ``critical power failure at a site'' that supposedly affected
+exactly one subscriber, when that site was actually serving over fifty
+people. The fault itself was real and correctly reported by the agent
+--- the problem was in the data, not the reasoning built on top of it,
+which is precisely why it is worth naming here rather than in the next
+chapter: it was a modeling gap in the simulator, not a mistake by the
+agent.
+
+The fix was to give every incident a defined \emph{scope}, matching how
+that class of fault actually behaves in a real network:
 
 \begin{itemize}
-    \item \textbf{A threshold the human should set.} Questions phrased
-    around ``high ARPU,'' ``heavy data users'' or ``above average'' get a
-    number input rather than a guess. This one exists because relative
-    baselines are actively misleading on skewed data: a handful of very
-    high-spending subscribers drag the mean up, so ``above average ARPU''
-    silently excludes customers a human would obviously count. The
-    operator types the cutoff, with a ``let the agent choose a sensible
-    one'' fallback for when they genuinely do not care.
-    \item \textbf{A breakdown with no stated dimension.} ``Show me a
-    drilldown of subscribers'' names no axis to break down by, so the
-    agent offers a small catalog of real drill paths --- by region, by
-    technology, by value segment. This gate is a plain lookup, no model
-    call, so it costs nothing.
-    \item \textbf{Genuine vagueness.} ``What should we focus on,''
-    ``biggest problems,'' ``where is there opportunity.'' Only these
-    reach a model call, and only after a keyword pre-filter
-    (\emph{best}, \emph{worst}, \emph{improve}, \emph{biggest},
-    \emph{priorit\ldots}) decides the question is vague enough to be
-    worth the latency. A specific question never pays for this check.
+    \item \textbf{Site-scoped} (power failure, site outage) ---
+    every active subscriber served by every cell on that site goes
+    down together. Rare by design (roughly 2\% of new incidents), since
+    a real outage at that scale is not a common event.
+    \item \textbf{Cell-scoped} (congestion, backhaul degradation,
+    signal interference) --- every active subscriber on that one cell
+    is affected. Deliberately weighted toward busier cells, since a
+    congestion event is naturally more likely to happen where there
+    are more people to congest.
+    \item \textbf{Subscriber-scoped} (throughput throttling, a DNS or
+    CDN hiccup, a dropped VoLTE bearer) --- exactly one customer,
+    biased toward high-value ones, the segment retention questions
+    actually care about. ``High-value'' here is not a fixed ARPU
+    threshold but the top decile of the live distribution, re-tested
+    whenever a subscriber's revenue moves --- so the label keeps
+    meaning something even as ARPU drifts.
 \end{itemize}
 
+Once a site- or cell-scoped incident fires, every subscriber caught in
+its blast radius gets a consistent snapshot of the incident attached to
+their record --- so a question filtered to high-value customers only
+returns the high-value customers genuinely inside that radius, not
+everyone the fault happened to touch. A power failure at a site serving
+mostly bronze-tier subscribers in a poorer part of the fictional map
+and one serving mostly platinum subscribers in a wealthier one are the
+same fault with completely different commercial urgency, which is
+exactly the distinction a purely per-customer model could never have
+produced.
+
+\subsection{Self-Healing}
+
+An incident does not sit open forever. Every tick, a separate resolution
+pass checks every active incident against the \texttt{expected\_}
+\texttt{resolution\_at} timestamp it was given at open, and closes
+anything past due: status flips to resolved, \texttt{resolved\_at} gets
+stamped, and any linked complaint gets marked resolved too. The row
+itself is never deleted, so a question like ``what happened to this
+customer at 14:32 today'' still has a real answer to give hours or days
+later --- the incident heals, but the history of it having happened
+does not disappear with it.
+
+\section{Alarms That Actually Mean Something}
+
+The blast-radius problem had a sibling that hid for much longer. Alarms
+and KPIs both looked fine on their own --- the alarms table filled up,
+the KPI numbers moved --- so neither invited a second look. But they
+were never connected to each other. Each tick raised an alarm on a cell
+picked uniformly at random, wrote the row, and stopped there, while the
+KPI generator rolled its own separate dice and never read the alarms
+table. Two independent random processes, presented as one story about
+network health. The giveaway was in the data: cells carrying an active
+\emph{critical} alarm measured a slightly \emph{lower} drop rate than
+cells with no alarm at all --- an inverted correlation, which is what
+noise looks like when you go looking for a relationship that was never
+there. And since cells were picked from the whole network rather than
+the parts of it serving people, 62\% of alarms sat on cells with zero
+subscribers on them.
+
+Fixing it meant wiring the two together in both directions, because
+real faults work both ways. Equipment faults --- a power failure, a
+hardware fault, a backhaul link going down --- announce themselves, and
+the degraded counters follow as a consequence. Performance faults are
+the reverse: congestion, interference and coverage holes have no box to
+raise a flag, and the only way anyone finds out is by watching the
+counters cross a threshold, which is what a real network management
+system calls a threshold-crossing alert. So a raised fault now degrades
+the cell it sits on --- each fault type hitting the metric it would
+actually hit, scaled by severity --- and opens real incidents for the
+customers on that cell if it is serious enough, feeding the same
+evidence trail and churn coupling described above. Running the other
+way, a detector reads each cell-day and raises the alarm those numbers
+deserve.
+
+One detail there is worth keeping, because the obvious approach fails
+quietly. Thresholds have to be relative to the technology, never
+absolute: a 1.9\% drop rate is a broken 5G cell and a completely
+ordinary 2G one, so a flat ``drop rate above 2\%'' rule flags 182 2G
+cells, 48 3G cells, and not a single 4G or 5G one. It does not detect
+faults --- it rediscovers that 2G is 2G. Every threshold is therefore
+expressed against that technology's own healthy baseline.
+
+Worth admitting, since it explains how the whole thing went unnoticed:
+the KPI update function had never actually written a row. The table it
+writes to was missing a uniqueness constraint its upsert depended on,
+the database helper swallowed the resulting error, and the function
+went on reporting how many cells it had updated every tick regardless.
+A process that reports success while doing nothing is worse than one
+that crashes, and the helpers now print real errors instead of
+retrying past them. With that fixed and the coupling in place, cells
+under an active alarm run roughly twice the drop rate of clean cells
+within every technology --- and every active alarm sits on a cell that
+actually serves customers.
+
+
+\section{Churn Tracks the Live World, Not Just Usage}
+
+Churn risk here is the sum of two parts, computed separately on purpose. The
+first is a baseline from a subscriber's own commercial behaviour --- spend
+falling against their own history, bills going unpaid, usage tailing off, a short
+tenure. The second is a penalty from what is happening to them on the network
+right now. Chapter~\ref{ch:eval} covers how that baseline is computed and why it
+ended up as an explainable scorecard rather than the machine-learning model
+originally trained for it.
+
+The reason for splitting them is that a baseline built from monthly commercial
+history has no way of reacting to something happening to a customer
+\emph{today}. The live incident log closes that gap: every affected subscriber
+is rescored the moment an incident opens against them, with a penalty added on
+top of the baseline, driven by how many active incidents and unresolved
+complaints they currently have. Once the incident heals, the next rescoring pass
+lets that penalty relax back down.
+
+So a platinum subscriber sitting on a comfortable, low-risk baseline can be
+pushed into a genuinely elevated risk band for as long as their streaming
+service is actually degraded, and settle back down once it recovers --- churn
+risk that tracks the live state of the world, rather than a number computed once
+and left to go stale. The two halves are kept strictly separate: the baseline
+never reads incidents, and the penalty never reads commercial history, so
+neither signal is counted twice.
+
+\section{Seeing It on the Map}
+
+The coverage map inherited from Chapter
+\ref{chapter:BF-DFP}'s fictional-geography design
+is not just a static backdrop --- it reflects the incident log live.
+Sites with an active incident get a pulsing ring, colored and animated
+by severity, and the map can be switched into an ``issues only'' view
+that fades out everything healthy and shows exclusively the sites
+currently in trouble. Clicking a ring asks the agent directly to
+explain that incident and how to address it, which is a small detail
+but not a cosmetic one: it means the agent's answers about live issues
+and what the map is currently showing are always describing the exact
+same data, because both are reading off the same table at the moment
+the question is asked.
+
 % =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-clarify.png
-% Where: chat UI (localhost:8000), Copilot tab.
-% What to capture: ask "5G upsell opportunities by region" and capture the
-% clarify card BEFORE clicking an option --- the question the agent asks
-% plus the list of option buttons, ideally with the answer that follows
-% after picking one visible underneath.
+% SCREENSHOT NEEDED --- figures/ch4-map-flash.png
+% Where: chat UI (localhost:8000), Coverage tab in the snapshot panel.
+% What to capture: the map with at least one pulsing incident ring
+% visible, ideally with the hover tooltip open showing the site/service/
+% severity details. If you can catch the "Issues only" toggle active
+% too, even better --- otherwise a normal view with rings is enough.
 % =====================================================================
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-clarify.png}
-\caption{The agent declining to guess: asked for ``5G upsell
-opportunities by region,'' it offers three concrete readings of the
-question plus an explicit ``just decide for me,'' and only runs a query
-once one is chosen.}
-\label{fig:ch5-clarify}
+\includegraphics[width=0.85\textwidth]{figures/ch4-map-flash.png}
+\caption{The coverage map flashing a live incident, colored and pulsing
+by severity, driven directly by the active rows in
+\texttt{experience\_incidents}.}
+\label{fig:ch4-map-flash}
 \end{figure}
 
-Two details make this behave like a tool rather than a chatbot demanding
-a conversation.
+\section{The Partial-Month Gotcha}
 
-The options are \emph{complete standalone questions}, not dialogue turns.
-Clicking ``High-value customers with 5G-capable devices but not on 5G
-plan'' runs exactly that, as though it had been typed. There is no
-half-remembered state waiting to be resumed, and nothing to go stale if
-the user wanders off and asks something else instead. It also removes an
-obvious way to build an infinite loop: the agent remembers which options
-it just offered, so a clicked option runs directly instead of tripping
-the same gate again and being asked to clarify its own clarification.
-
-And the agent never asks the user to define a term the data already
-defines. ``High-value customer'' is not a matter of opinion here --- it
-is a column. Neither is ``having an issue right now,'' which is a row in
-the live incident log with a timestamp on it. Questions like ``do we have
-any HVCs with streaming issues right now'' therefore skip the whole gate
-and run immediately, because every term in them is already pinned down by
-the schema. Asking about those would not be careful, it would be
-annoying.
-
-The pattern here is the same one that runs through the rest of this
-chapter. An agent that guesses and sounds certain is worse than one that
-admits the question has more than one reading, in exactly the way an
-answer built on numbers it never queried is worse than one that says it
-does not know.
-
-\section{Grounding the Agent in Domain Knowledge}
-
-Knowing the four tools is one thing. Knowing which columns actually
-exist in a twenty-plus table schema, or which of the two databases a
-given question even belongs to, is another. So where does that
-knowledge come from, if not from the model just knowing it?
-
-Two different mechanisms, doing two different jobs, kept deliberately
-separate. The first is a set of fixed behavioral rules baked directly
-into the system prompt --- for example, a ranking principle that tells
-the agent to compute every metric in one grouped query and never rank
-by one number while quoting another. These are general, apply to every
-question, and exist to fix \emph{reasoning} mistakes.
-
-The second is retrieval: the same retrieval-augmented generation idea
-behind giving a language model access to an external knowledge source
-instead of relying purely on what it already knows~\cite{rag}, applied
-here to schema and SQL knowledge rather than open-domain text. A schema
-knowledge graph only injects the subgraph of tables and join paths
-relevant to the current question, an intent classifier routes a
-question toward the network side, the commercial side, or both, and a
-hybrid search index --- BM25~\cite{bm25} keyword matching and FAISS-based
-vector search~\cite{faiss}, merged --- surfaces telecom-specific SQL
-patterns on demand. This half handles \emph{knowledge} gaps, not
-reasoning ones.
-
-Why bother splitting these two apart instead of just cramming
-everything into one long prompt? Because a knowledge gap and a
-reasoning gap need different fixes, and mixing them up leads to
-whack-a-mole: patch one bad query with a hardcoded example, and the
-next slightly different question breaks the exact same way. A general
-principle generalizes. A one-off example does not.
-
-\section{Catching the Model's Mistakes}
-
-Grounding the agent in the right knowledge cuts down on mistakes. It
-does not eliminate them, so the loop also has to catch what slips
-through, on both ends: before a query runs, and before an answer
-reaches the user.
-
-Before a query runs, every SQL statement the model writes gets checked
-against the real schema first. If it references a column that does
-not exist --- something models do fairly often when a table has a lot
-of similarly-named fields --- the check fails before anything executes,
-and the real column names of that table get fed back to the model
-so it can correct itself on the next step rather than guessing again
-blind.
-
-After a query runs, there is a second check aimed at the answer text
-itself: does every number the model cites in its final answer actually
-appear somewhere in the rows it just queried? If more than half of the
-significant numbers in an answer cannot be traced back to real data,
-that answer gets regenerated once, this time explicitly restricted to
-only the numbers actually present in the results.
-
-That second check exists because of a very concrete failure mode this
-project ran into directly. Even with the four tools in place, the model
-would sometimes still call \texttt{conclude} correctly, but instead of
-using the structured \texttt{chart} or \texttt{recommendations} fields
-it was given, it would write the entire answer --- prose, a numbered
-recommendations list, and a raw JSON strategy-diagram spec --- all
-crammed into the plain \texttt{text} field. The practical result: a
-question like ``5G upsell opportunities by region'' would come back
-with a clean paragraph of analysis followed by a wall of unrendered
-JSON dumped straight into the chat. The fix walks the text field for
-exactly this pattern --- a labeled block followed by a JSON object ---
-lifts it into the field it was actually meant for, and strips it out of
-the text; a numbered ``Recommendations:'' list gets the same treatment.
-Anything that still looks like a stray JSON object after that gets
-hard-stripped as a last resort, so raw JSON can no longer reach the
-chat under any circumstance. Verified against the exact leaked output
-that triggered this fix, plus a handful of regression cases to make
-sure well-formed answers were left untouched.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-leak-before.png (OPTIONAL, only if
-% you still have it saved from testing before the fix went in)
-% What to capture: the actual broken output from asking "5G upsell
-% opportunities by region" pre-fix --- clean paragraph of analysis
-% followed by the raw strategy_diagram JSON dumped as visible text.
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-leak-after.png
-% Where: chat UI, Copilot tab.
-% What to capture: ask the exact same question ("5G upsell opportunities
-% by region", or any other segment/migration/commercial breakdown
-% question) now. Should show a clean text answer with no visible JSON,
-% and the Strategy Diagram / Mind Map buttons rendering the same data
-% properly instead of dumping it as text.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-\begin{minipage}{0.48\textwidth}
-\centering
-% \includegraphics[width=\textwidth]{figures/ch5-leak-before.png}
-\caption*{Before: raw JSON leaking into the answer text.}
-\end{minipage}
-\hfill
-\begin{minipage}{0.48\textwidth}
-\centering
-% \includegraphics[width=\textwidth]{figures/ch5-leak-after.png}
-\caption*{After: the same question, clean.}
-\end{minipage}
-\caption{The conclude-leak bug, before and after the fix described above.}
-\label{fig:ch5-leak}
-\end{figure}
-
-\section{Beyond Answering: Actions and Visuals}
-
-Not every question is best answered with a paragraph. The
-\texttt{conclude} tool can attach a chart, a drill-down mind map, or a
-two-column strategy diagram alongside the text, letting the agent
-choose a visual when a visual is actually the right answer --- a
-regional breakdown is a bar chart, not three sentences trying to
-describe one.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-chart-example.png
-% Where: chat UI, Copilot tab.
-% What to capture: any question that naturally produces a Plotly chart
-% in the answer (bar/pie/treemap --- e.g. "technology distribution by
-% region" or "ARPU by segment"). Capture the rendered chart itself,
-% ideally with its title/legend visible.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-chart-example.png}
-\caption{A Plotly chart attached to a \texttt{conclude} call, built
-directly from the query results rather than left for the model to
-describe in words.}
-\label{fig:ch5-chart}
-\end{figure}
-
-For anything that is really a hierarchy rather than a flat comparison
---- subscribers broken down by region, then technology, then value
-segment --- the mind map is the better fit: an interactive drill-down
-tree the user can expand, collapse, or re-root into a single branch,
-rather than a static image.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-mindmap-example.png
-% Where: chat UI, Copilot tab. Click the "Mind Map" button under an
-% eligible answer, or ask a drilldown question directly (e.g.
-% "drilldown of subscriber counts by region, technology, and value
-% segment"). Capture the mind map expanded a couple of levels deep,
-% ideally showing the toolbar (layout cycle / expand / collapse / fit).
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-mindmap-example.png}
-\caption{The drill-down mind map, expanded a few levels into a
-subscriber segmentation.}
-\label{fig:ch5-mindmap}
-\end{figure}
-
-The strategy diagram goes one step further than visualizing the data:
-it pairs each subscriber segment with a recommended commercial
-strategy, laid out as two connected columns so the segment-to-strategy
-mapping is visible at a glance rather than buried in a paragraph.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-strategy-diagram.png
-% Where: chat UI, Copilot tab. Click the "Strategy Diagram" button under
-% an eligible answer (commercial/upsell/churn-flavored questions).
-% What to capture: the two-column diagram with segments on one side,
-% strategies on the other, and the connecting lines between them.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-strategy-diagram.png}
-\caption{The strategy diagram, mapping subscriber segments to
-recommended commercial actions.}
-\label{fig:ch5-strategy}
-\end{figure}
-
-The last of the ``beyond text'' outputs is the export button: any
-answer built from row-level data (subscribers, devices, cells) can be
-exported as a CSV, and the export query is not just the original
-query re-run --- the model is asked to add one to three annotation
-columns (\texttt{recommended\_action}, \texttt{priority},
-\texttt{campaign\_type}) computed with SQL \texttt{CASE WHEN} logic, so
-the export is directly actionable rather than a raw data dump someone
-still has to interpret.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-csv-export.png
-% What to capture: the exported CSV from a subscriber-level answer,
-% opened in Excel/LibreOffice, with the extra annotation columns
-% (recommended_action / priority / campaign_type) visible alongside the
-% real data columns.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-csv-export.png}
-\caption{An exported CSV with LLM-annotated columns added on top of the
-raw query results.}
-\label{fig:ch5-csv}
-\end{figure}
-
-\subsection{Proposing Actions: the Agent Does Not Get to Act Alone}
-
-The \texttt{propose\_action} tool works on a different principle
-entirely from the three above: the agent does not get to act on its
-own. This is the one tool that reaches outside the chat portal, and it
-is deliberately built so that reaching outside never means acting
-outside without a human in the loop.
-
-When the agent calls \texttt{propose\_action}, the chat server does not
-touch the database at all. It publishes the proposal --- a campaign, an
-SMS, a network flag --- to an MQTT~\cite{mqtt} topic, which is picked up by a
-second, entirely separate server: the ops portal. That portal writes
-the proposal into an \texttt{agent\_actions} table as \emph{pending}
-and surfaces it in a human review queue. Only once a human approves it
-(optionally editing the SMS text or the target audience first) does
-anything actually get written to the commercial database --- a real
-campaign row, a real SMS log entry. Deny it, and nothing happens at
-all. The agent itself never executes anything; it only ever proposes.
-
-% =====================================================================
-% SCREENSHOT NEEDED --- figures/ch5-ops-review.png
-% Where: ops portal (localhost:8001). What to capture: the review queue
-% showing a pending action proposed by the agent (a campaign or SMS),
-% ideally with the review modal open showing the Approve/Deny buttons.
-% =====================================================================
-\begin{figure}[htbp]
-\centering
-% \includegraphics[width=0.85\textwidth]{figures/ch5-ops-review.png}
-\caption{A proposed action waiting for human review in the ops portal,
-having arrived there over MQTT from the chat server.}
-\label{fig:ch5-ops-review}
-\end{figure}
-
-Why MQTT specifically, rather than just having the chat server write to
-the database directly? Because the two servers are meant to stay
-decoupled: the chat portal proposes, the ops portal decides and
-executes, and the message bus between them is the only thing they
-actually share. Approve it in the review queue, and the campaign or SMS
-gets written for real; deny it, and nothing happens at all --- the
-agent's proposal simply expires unactioned.
-
-\section{Staying Fast: the Fast Path and the Semantic Cache}
-
-The full loop in Figure~\ref{fig:agent-loop} is built for questions
-that genuinely need multiple steps of reasoning. Running the entire
-loop for something like ``how many 5G subscribers are there'' would
-work, but it is a lot of machinery for a question with a one-query
-answer, and it is slow for no reason.
-
-Two shortcuts sit in front of the loop to avoid that waste. The first
-is a fast path: questions recognized as a single simple metric skip
-the loop entirely and go straight to a single-shot query, cutting the
-usual multi-step latency down to one call. The second is a semantic
-cache: if a new question is close enough (cosine similarity of at
-least 0.92 against a recent question's embedding) to something already
-answered this session, the cached result comes back immediately
-instead of re-running the loop. That threshold is set deliberately
-high --- a looser one would start returning the answer for ``drop rate
-in the Fire Nation'' to a question about the Water Tribe, which is
-worse than just being slow.
-
-\section{Remembering the Conversation}
-
-None of this works turn to turn without some notion of memory, since
-the model itself is stateless --- every call starts from nothing
-unless the conversation so far is fed back in explicitly. The
-straightforward option, replaying every prior turn verbatim on every
-new question, gets expensive fast in a long conversation. The other
-extreme, summarizing everything, loses the specific numbers and
-phrasing a follow-up question often depends on.
-
-The agent splits the difference: the most recent turns are kept and
-replayed verbatim, so a direct follow-up (``what about last month
-instead'') has the exact prior context to work from, while anything
-older than that gets folded into a running summary instead of being
-dropped outright. The conversation the model actually sees on any
-given turn is therefore a mix of a short gist of the early part of the
-conversation plus the real, unedited recent turns --- bounded cost,
-without hard-forgetting anything that happened earlier in the session.
-It is similar in spirit to how long-running AI assistants keep a
-conversation going well past what would otherwise fit in a single
-context window --- recent turns kept exact, older ones compressed into
-a summary rather than dropped --- just applied here at a far smaller
-scale, over a handful of turns instead of an entire extended session.
+Because monthly usage figures accumulate tick by tick over the course
+of a simulated month rather than existing fully formed from day one,
+there is a real and slightly counterintuitive consequence worth naming
+directly: a question asked on the second day of a new simulated month
+legitimately returns a much smaller number than the exact same question
+asked on the last day of the previous one. Read in isolation, a ``top
+data user this month'' answer of a few gigabytes early in a cycle can
+look like the agent got it wrong, when it is in fact reporting a
+partial month correctly and honestly. This came up directly during
+testing: an answer citing a small usage figure for a specific
+subscriber looked, at first glance, like a fabricated number, until
+checking the live database confirmed it was exactly correct for how
+far into the month the simulation currently was. Knowing the data is
+genuinely live --- not stale, not wrong, just incomplete for the
+current period --- is what keeps a correct answer from being misread
+as a bug.
 
 \section*{Conclusion}
 \addcontentsline{toc}{section}{Conclusion}
 
-This chapter walked through what actually turns a single Bedrock call
-into an agent: the same perceive-decide-act-observe loop the very
-first local prototype used, now expressed through structured tool
-calls instead of hoped-for text tags. Grounding keeps that loop
-pointed at the real schema instead of guessing, mistake-catching
-stops bad SQL and ungrounded answers before they reach the user, and
-the conclude/propose\_action split gives the agent a way to act beyond
-plain text --- charts, mind maps, strategy diagrams, CSV exports, and
-proposals that only ever become real through a human in the ops
-portal --- without ever acting unsupervised. And because the database
-underneath all of it never holds still, as Chapter~\ref{ch:livingdb} established, the
-fast path, the cache, and the memory system all exist for the same
-reason: to keep a system reasoning over a moving target fast,
-consistent, and honest. Between what Chapter~\ref{ch:livingdb} and this chapter
-covered, the core of the project is now on the table --- a live,
-self-updating environment, and an agent that can actually reason over
-it without acting alone.
+This chapter covered the piece of the project that everything else
+quietly depends on: a database that never actually holds still.
+\texttt{db\_simulator.py} advances KPIs, usage, and the subscriber base
+tick by tick, but the real weight of the chapter is the incident
+lifecycle built on top of it --- faults that open with a real cause, a
+proportionate blast radius instead of a flat per-customer model, and a
+resolution path that lets them heal on their own, all of it feeding
+directly into churn scoring and the live coverage map. None of this
+exists for its own sake. It exists so that the agent, covered in the
+next chapter, cannot get away with memorizing an answer and repeating
+it --- every claim it makes has to survive being checked against
+whatever the database currently says, because the database it is
+reading from is not the same one it was reading from five minutes ago.

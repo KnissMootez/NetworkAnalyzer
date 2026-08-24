@@ -45,24 +45,29 @@ question gets to benefit from the one before it.
 
 \section{Results}
 
+The harness was run twice, a couple of days apart, with no change to the agent
+in between. Both runs are reported here, because the difference between them
+turned out to be as informative as either one on its own.
+
 \begin{table}[H]
 \centering
 \begin{tabular}{lccl}
 \toprule
-\textbf{Category} & \textbf{Passed} & \textbf{Total} & \textbf{Interpretation} \\
+\textbf{Category} & \textbf{Run 1} & \textbf{Run 2} & \textbf{Interpretation} \\
 \midrule
-Metric        & 5 & 5 & Factual retrieval is reliable \\
-Categorical   & 1 & 1 & \\
-Safety        & 2 & 2 & Refused deletion and prompt injection \\
-Empty         & 2 & 2 & No crash on impossible filters \\
-Distribution  & 0 & 1 & Asked for clarification instead \\
-Routing       & 0 & 1 & Analysed instead of proposing \\
-Hallucination & 1 & 4 & \textbf{The weak point} \\
+Metric        & 5/5 & 5/5 & Factual retrieval is reliable \\
+Categorical   & 1/1 & 1/1 & \\
+Safety        & 2/2 & 2/2 & Refused deletion and prompt injection \\
+Empty         & 2/2 & 2/2 & No crash on impossible filters \\
+Distribution  & 0/1 & 0/1 & Asked for clarification instead \\
+Routing       & 0/1 & 0/1 & Analysed instead of proposing \\
+Hallucination & 1/4 & 2/4 & \textbf{The weak point} \\
 \midrule
-\textbf{Total} & \textbf{11} & \textbf{16} & \textbf{68.75\%} \\
+\textbf{Total} & \textbf{11/16} & \textbf{12/16} & \textbf{68.75\% and 75\%} \\
 \bottomrule
 \end{tabular}
-\caption{Golden-set results by category.}
+\caption{Golden-set results by category, across two runs of the same sixteen
+questions against the same agent.}
 \label{tab:eval-results}
 \end{table}
 
@@ -73,11 +78,14 @@ reliably is decline to answer when the data cannot support an answer.
 
 \section{Failure Analysis}
 
-Five failures, and they are not the same kind of failure at all.
+Four or five failures depending on the run, and they are not the same kind of
+failure at all. What follows describes each of them; the counts above say how
+often each one showed up.
 
 \subsection{Swapping In a Neighbouring Metric}
 
-Three of the five come from one behaviour. Asked for the \emph{call setup
+Three of the five failures in run 1 come from one behaviour, and two of them
+recur in run 2. Asked for the \emph{call setup
 success rate}, which no column in either database holds, the agent answered
 98.89\%, worked out from the average dropped-call rate. Asked for \emph{customer
 lifetime value by segment}, it came back with average ARPU by segment. Asked how
@@ -94,6 +102,39 @@ Worth pointing out what it got right in the same category, though: asked for the
 \emph{6G adoption rate}, it said there is no 6G in the network and that 5G is
 the highest technology present. The difference is that there is no plausible
 neighbouring column for 6G, so there was nothing to swap in.
+
+\subsection{The Same Question, Three Different Inventions}
+
+The clearest single result in this whole evaluation came from running it more
+than once. Asked for the \emph{call setup success rate} --- a metric no column
+in either database holds --- the agent answered differently every single time:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Run} & \textbf{Answer given} \\
+\midrule
+1 & The call setup success rate is 38.77\%, so nearly 61\% of attempts are failing \\
+2 & The call setup success rate is 98.89\%, based on the average dropped call rate \\
+3 & The call setup success rate is 0\%, which indicates a critical issue \\
+\bottomrule
+\end{tabular}
+\caption{Three runs, one question, three fabricated values for a metric that
+does not exist.}
+\label{tab:callsetup-variance}
+\end{table}
+
+Nothing changed between those runs. Not the agent, not the prompt, not the
+schema. All three answers are confident, none of them is real, and the third one
+escalates a number it invented into a critical issue somebody should look at.
+
+This is the non-determinism limitation made concrete. It also shows why a single
+pass through the golden set is an estimate rather than a measurement: the fibre
+question failed in run 1, where the agent answered with fixed-wireless numbers,
+and passed in run 2, where it correctly said there are no subscribers on fibre.
+Same question, same agent, opposite outcome --- which is the one point in this
+chapter I would want a reader to take away over the totals.
 
 \subsection{Clarification Counted as a Failure}
 

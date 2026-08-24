@@ -16,11 +16,11 @@ target, grounds every query in the real schema instead of guessing, checks its
 own output before handing it over, and refuses to touch anything operational
 without a human saying yes first.
 
-Measured on a golden set of sixteen questions, it gets every factual question
-right, refuses every destructive instruction and every prompt injection, and
-does not fall over on questions that have no answer at all. It fails at exactly
-one thing, and it fails at it reliably: admitting that it does not have
-something. Ask it for a metric the schema simply does not hold, and instead of
+Measured on a golden set of sixteen questions, run twice, it gets every factual
+question right both times, refuses every destructive instruction and every
+prompt injection, and does not fall over on questions that have no answer at
+all. It fails at exactly one thing, and it fails at it reliably: admitting that
+it does not have something. Ask it for a metric the schema simply does not hold, and instead of
 saying so, it grabs the closest real metric it can find and reports that
 instead. Every number in that answer is real, which is exactly why every
 verification layer in the system waves it straight through.

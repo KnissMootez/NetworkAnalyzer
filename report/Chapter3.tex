@@ -23,7 +23,7 @@ The schema was designed to cover the main data domains that TM Forum's Informati
 
 \texttt{NetworkAnalyzer\_new.db} covers everything on the network and operational side, organized into five groups:
 
-\textbf{Infrastructure} --- the physical layer. The \texttt{sites} table holds base station locations across 24 regions, and \texttt{cells} holds the individual radio cells attached to each site, with their technology generation (2G/3G/4G/5G) and frequency band.
+\textbf{Infrastructure} --- the physical layer. The \texttt{sites} table holds base station locations across 21 regions and 24 cities, and \texttt{cells} holds the individual radio cells attached to each site, with their technology generation (2G/3G/4G/5G) and frequency band.
 
 \textbf{Subscribers} --- the subscriber layer. The \texttt{subscribers} table holds core identity and location data. \texttt{subscriber\_technology} tracks each subscriber's current active technology and VoLTE status. \texttt{devices} holds device capability information --- whether the handset supports 5G, VoLTE, or Wi-Fi calling. \texttt{coverage} maps which cells a subscriber can reach from their home location.
 

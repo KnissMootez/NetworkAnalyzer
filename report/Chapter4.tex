@@ -229,10 +229,13 @@ deserve.
 One detail there is worth keeping, because the obvious approach fails
 quietly. Thresholds have to be relative to the technology, never
 absolute: a 1.9\% drop rate is a broken 5G cell and a completely
-ordinary 2G one, so a flat ``drop rate above 2\%'' rule flags 182 2G
-cells, 48 3G cells, and not a single 4G or 5G one. It does not detect
-faults --- it rediscovers that 2G is 2G. Every threshold is therefore
-expressed against that technology's own healthy baseline.
+ordinary 2G one. A flat ``drop rate above 2\%'' rule currently flags
+188 2G cells, 45 3G cells and 50 4G cells --- and not one of those
+188 2G cells is under an alarm, while every single one of the 50 4G
+cells is. So the rule does find the real faults, and then buries them
+under nearly four times as many cells whose only crime is being 2G.
+Every threshold is therefore expressed against that technology's own
+healthy baseline.
 
 Worth admitting, since it explains how the whole thing went unnoticed:
 the KPI update function had never actually written a row. The table it
@@ -242,9 +245,10 @@ went on reporting how many cells it had updated every tick regardless.
 A process that reports success while doing nothing is worse than one
 that crashes, and the helpers now print real errors instead of
 retrying past them. With that fixed and the coupling in place, cells
-under an active alarm run roughly twice the drop rate of clean cells
-within every technology --- and every active alarm sits on a cell that
-actually serves customers.
+under an active alarm run between 1.4 and 2.1 times the drop rate of
+clean cells depending on the technology --- and almost every active
+alarm now sits on a cell that actually serves somebody, 1{,}089 out of
+1{,}099.
 
 
 \section{Churn Tracks the Live World, Not Just Usage}

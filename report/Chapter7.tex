@@ -132,15 +132,31 @@ have caught all three substitution failures, and it is really just the offer
 catalogue fix from Chapter~\ref{ch:agent} generalised: hand the model the
 authoritative vocabulary and check against it, instead of hoping.
 
-\subsection{Actually Validating the Churn Scorecard}
+\subsection{Making the Churn Signal Validatable at All}
 
-The simulator already deactivates subscribers when they churn, which means it
-has been producing labelled outcomes this whole time and nobody has used them.
-Score the population, let a few simulated months go by, then measure which
-flagged subscribers actually left. That would give the scorecard the validation
-it currently does not have, and would test whether those weights are sensible or
-just plausible. Cheapest path from an unvalidated heuristic to a measured one,
-and it needs no external data at all.
+The scorecard is not validated, and in this environment it currently cannot be.
+I originally assumed it could: the simulator deactivates subscribers when they
+churn, so the labelled outcomes must be sitting there waiting. They are not.
+Two problems, and both need the simulator changed before any of this is worth
+attempting.
+
+First there are barely any outcomes --- the simulator has produced a couple of
+churn events, which is not a validation set by anybody's standards. Second, and
+worse, it picks who churns by selecting bronze-segment subscribers with the
+lowest ARPU. That rule has nothing to do with unpaid bills, spend decline,
+tenure or engagement, which is everything the scorecard actually measures. So
+even with thousands of events, checking the scorecard against them would measure
+how well it agrees with an arbitrary rule, not how well it anticipates churn.
+
+The fix has to come first, and it is the same one from the previous subsection:
+make churn in the simulator \emph{caused} by things a model could plausibly
+observe --- spend falling away, bills going unpaid, a run of bad experience ---
+instead of a segment-and-sort. Do that and three things become possible at once:
+a declining cohort exists for the decline terms to find, the churn events carry
+real signal, and both the scorecard and a properly retrained model become
+something you can actually measure. Until then, the honest position is the one
+this report takes: the indicator ranks subscribers by observable risk factors,
+and how well that ranking anticipates real churn is unknown.
 
 \subsection{Towards Something Deployable}
 

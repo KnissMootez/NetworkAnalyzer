@@ -16,10 +16,11 @@ with operational consequence is proposed rather than executed, and waits for hum
 approval. Evaluation on a golden set of sixteen questions spanning factual retrieval,
 disambiguation, safety and hallucination resistance establishes both what works and
 where the system fails: the agent handles factual and safety cases reliably, but
-fabricates plausible values when asked for a metric the schema does not contain. An
-integrated XGBoost churn model, trained on 99{,}999 subscriber records with SMOTE
-balancing, reaches 0.93 accuracy and 0.88 AUC-ROC while recovering only 56\% of actual
-churners --- a gap reported here rather than hidden behind the headline figure. The
+fabricates plausible values when asked for a metric the schema does not contain. A churn
+risk indicator, one of several data sources the agent can reach, replaced a
+machine-learning model that reported 0.88 AUC-ROC on its own training data and was
+found not to transfer to this environment at all --- a negative result reported here
+rather than quietly left in place. The
 principal contribution is not the assistant itself but the finding that correctness in
 such a system must be enforced by deterministic verification around the model rather
 than requested of it: identical failures appeared on a substantially larger model,
@@ -50,10 +51,12 @@ ensemble de référence de seize questions couvrant la recherche factuelle, la
 désambiguïsation, la sûreté et la résistance à l'hallucination établit à la fois ce qui
 fonctionne et ce qui échoue : l'agent traite de manière fiable les cas factuels et de
 sûreté, mais fabrique des valeurs plausibles lorsqu'on lui demande une métrique absente
-du schéma. Un modèle de résiliation XGBoost intégré, entraîné sur 99{,}999
-enregistrements avec rééquilibrage SMOTE, atteint 0,93 d'exactitude et 0,88 d'AUC-ROC
-tout en ne détectant que 56\% des résiliations réelles --- un écart rapporté ici plutôt
-que dissimulé derrière le chiffre global. La contribution principale n'est pas
+du schéma. Un indicateur de risque de résiliation, l'une des
+sources de données que l'agent peut interroger, a remplacé un modèle
+d'apprentissage automatique qui affichait 0,88 d'AUC-ROC sur ses propres données
+d'entraînement et dont il s'est avéré qu'il ne se transposait pas du tout à cet
+environnement --- un résultat négatif rapporté ici plutôt que laissé en place
+sans rien dire. La contribution principale n'est pas
 l'assistant lui-même mais le constat que la correction d'un tel système doit être
 imposée par une vérification déterministe autour du modèle plutôt que demandée à
 celui-ci : des défaillances identiques sont apparues sur un modèle nettement plus grand,

@@ -203,7 +203,7 @@ invented geography looks like at scale.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch2-fictional-data.png}
-\caption{The invented geography at scale: subscriber technology mix broken
+\caption[The invented geography at scale]{The invented geography at scale: subscriber technology mix broken
 down by region, rendered from the live database. Every region name here is
 fictional, and an aggregate view like this one demonstrates the point better
 than a table of raw rows would --- the invented world is internally consistent
@@ -357,6 +357,80 @@ response never gets duplicated. Small piece of plumbing, but it is the
 difference between the agent occasionally failing for no visible reason
 and quietly recovering from the kind of hiccup any cloud API throws
 from time to time.
+
+% =====================================================================
+% System architecture: processes, stores, and what talks to what.
+% =====================================================================
+\begin{figure}[H]
+\centering
+\definecolor{procblue}{HTML}{4A6FA5}
+\definecolor{storebrown}{HTML}{B5793A}
+\definecolor{extgreen}{HTML}{2E8B57}
+\definecolor{busamber}{HTML}{C08A2E}
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  proc/.style={rectangle, rounded corners=4pt, draw=procblue, very thick,
+    fill=procblue!10, align=center, text width=3.4cm, inner sep=7pt,
+    font=\bfseries\footnotesize},
+  store/.style={cylinder, shape border rotate=90, aspect=0.22,
+    draw=storebrown, very thick, fill=storebrown!12, align=center,
+    text width=2.5cm, inner sep=5pt, font=\scriptsize},
+  ext/.style={rectangle, rounded corners=4pt, draw=extgreen, very thick,
+    fill=extgreen!10, align=center, text width=3.0cm, inner sep=7pt,
+    font=\bfseries\footnotesize},
+  bus/.style={rectangle, rounded corners=3pt, draw=busamber, very thick,
+    fill=busamber!15, align=center, text width=4.0cm, inner sep=6pt,
+    font=\scriptsize\ttfamily},
+  user/.style={rectangle, rounded corners=3pt, draw=black!55, thick,
+    fill=black!5, align=center, text width=2.9cm, inner sep=6pt,
+    font=\footnotesize},
+  lbl/.style={font=\scriptsize\itshape, align=center, inner sep=2pt},
+  flow/.style={-{Latex[length=2.4mm]}, thick},
+  biflow/.style={{Latex[length=2.4mm]}-{Latex[length=2.4mm]}, thick},
+]
+
+% ---- nodes, placed on explicit coordinates ----
+\node[user]  (browser) at ( 0,   0)    {Operator\\[1pt]\normalfont\scriptsize web browser};
+\node[proc]  (chat)    at ( 0,  -2.0)  {Chat Server\\[2pt]\normalfont\scriptsize server.py : 8000};
+\node[ext]   (bedrock) at ( 6.4,-2.0)  {AWS Bedrock\\[2pt]\normalfont\scriptsize qwen3-32b / 80b-a3b};
+\node[proc]  (agent)   at ( 0,  -4.2)  {Reasoning Agent\\[2pt]\normalfont\scriptsize tool loop, grounding,\\verification};
+
+\node[proc]  (sim)     at (-6.9,-7.0)  {Simulator\\[2pt]\normalfont\scriptsize db\_simulator.py\\one tick / 30 s};
+\node[store] (scdb)    at (-2.9,-7.0)  {NetworkAnalyzer\\\_new.db\\[2pt]\itshape network};
+\node[store] (opdb)    at ( 2.9,-7.0)  {operator\\\_new.db\\[2pt]\itshape commercial};
+\node[proc]  (dash)    at ( 6.9,-7.0)  {Dashboard\\[2pt]\normalfont\scriptsize dashboard\_server.py\\: 8002};
+
+\node[bus]   (mqtt)    at ( 0,  -9.8)  {MQTT broker : 1883\\[1pt]\rmfamily networkanalyzer/actions/\#};
+\node[proc]  (ops)     at ( 0, -11.6)  {Ops Portal\\[2pt]\normalfont\scriptsize ops\_server.py : 8001};
+\node[user]  (human)   at ( 0, -13.4)  {Human reviewer\\[1pt]\normalfont\scriptsize approve / edit / reject};
+
+% ---- edges ----
+\draw[biflow] (browser) -- node[lbl,right]{question / answer} (chat);
+\draw[biflow] (chat) -- node[lbl,above]{tool calls} (bedrock);
+\draw[flow]   (chat) -- (agent);
+
+\draw[biflow] (agent.south) -- ++(0,-0.6) -| (scdb.north);
+\draw[biflow] (agent.south) -- ++(0,-0.6) -| (opdb.north);
+
+\draw[flow] (sim.east) -- node[lbl,above]{writes} (scdb.west);
+\draw[flow] (sim.south) -- ++(0,-1.1) -| (opdb.south);
+
+\draw[flow] (scdb.east) -- ++(0.5,0) |- (dash.west);
+\draw[flow] (opdb.east) -- node[lbl,above]{reads} (dash.west);
+\draw[flow] (dash.north) |- ++(0,1.4) -| node[lbl,above right]{charts} (browser.east);
+
+\draw[flow] (agent.south) -- ++(0,-0.6) -- (0,-9.0) -- node[lbl,right]{propose\_action} (mqtt.north);
+\draw[flow] (mqtt) -- node[lbl,right]{subscribe} (ops);
+\draw[biflow] (ops) -- node[lbl,right]{review queue} (human);
+\draw[flow] (ops.east) -- ++(1.6,0) |- node[lbl,below right, text width=2.6cm]{written only after approval} (opdb.south east);
+
+\end{tikzpicture}%
+}
+\caption[End-to-end system architecture]{End-to-end system architecture: five
+processes sharing two SQLite files, with every outward-facing action routed
+through the message bus and a human reviewer.}
+\label{fig:architecture}
+\end{figure}
 
 \section*{Conclusion}
 

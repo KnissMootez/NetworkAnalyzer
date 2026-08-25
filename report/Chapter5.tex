@@ -130,7 +130,7 @@ version, not a difference in the underlying idea.
 
 \end{tikzpicture}%
 }
-\caption{The agent's reasoning loop. The model chooses exactly one
+\caption[The agent's reasoning loop]{The agent's reasoning loop. The model chooses exactly one
 tool call per step; \texttt{run\_sql} and \texttt{inspect\_schema}
 feed their results back into another round of reasoning, while
 \texttt{conclude} and \texttt{propose\_action} end the loop. This is
@@ -149,7 +149,7 @@ each step is not shown in full.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.8\textwidth]{figures/ch5-steps-panel-b.png}
-\caption{The steps panel expanded under a finished answer. Both \texttt{run\_sql}
+\caption[The steps panel under a finished answer]{The steps panel expanded under a finished answer. Both \texttt{run\_sql}
 iterations are logged before the model called \texttt{conclude} --- including the
 first, which returned no rows and sent the agent back to write a different query
 against another table. The failed attempt is left visible rather than hidden.}
@@ -209,7 +209,7 @@ three without paying for any of them:
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch5-clarify.png}
-\caption{The agent declining to guess: asked for ``5G upsell
+\caption[The agent declining to guess]{The agent declining to guess: asked for ``5G upsell
 opportunities by region,'' it offers three concrete readings of the
 question plus an explicit ``just decide for me,'' and only runs a query
 once one is chosen.}
@@ -427,7 +427,7 @@ rather than a static image.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch5-mindmap-example.png}
-\caption{The drill-down mind map, in its radial layout with one region
+\caption[The drill-down mind map]{The drill-down mind map, in its radial layout with one region
 expanded into its technology split. What a page cannot show is that this
 is not a picture: every node expands and collapses on click, the layout
 toggles between radial and tree, and the tree can be re-rooted into a

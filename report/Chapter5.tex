@@ -23,7 +23,13 @@ against a target that is actively moving, not a fixed snapshot. This
 chapter covers how that loop actually works today, how it grounds
 itself in the real schema instead of guessing, how it catches its own
 mistakes before they reach the user, and everything it can do beyond
-just answering in text.
+just answering in text. And it is worth flagging what to watch for while reading
+it. Chapter~\ref{ch:context}, Section~\ref{sec:challenges}, laid out three gaps
+that started this whole project off: raw data that never quite becomes actionable
+insight, churn scores that live somewhere the people who need them do not look,
+and a wait between asking a business question and getting an answer backed by
+real data. Everything from here on is those three being handled one at a time, so
+it is worth keeping them in mind as each piece goes past.
 
 \section{The Loop: One Consistent Idea, Two Implementations}
 

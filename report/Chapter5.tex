@@ -49,15 +49,12 @@ current agent is not this cycle, but how an ``action'' gets expressed
 and recognized. In Chapter~\ref{chapter:BF-DFP}, the model wrote a plain-text tag ---
 \texttt{QUERY\_SC:}, \texttt{QUERY\_OP:}, or \texttt{CONCLUDE:} ---
 followed by whatever it wanted to run or say, and the code on this end
-parsed it back out with regular expressions. It worked, but nothing
-forced the model to actually follow that format, and when it drifted
-from it even slightly, the step failed silently and the loop had no
-clean way to recover.
+parsed it back out with regular expressions. It worked, however nothing 
+forced the model to follow that format specifically, as it drifts slightly to 
+the step failed, without any clean way for the loop to recover.
 
-Bedrock's tool-calling interface replaced that free-text convention
-with something the model is structurally constrained to follow: a
-fixed set of callable tools, each with a defined input shape, that the
-API itself validates before the loop ever sees them:
+To solve that issue, Bedrock's tool calling replaced the convention with a schema: a
+fixed set of tools, each having an input shape, validated by the API before the loop sees anything:
 
 \begin{itemize}
     \item \texttt{run\_sql(database, query)} --- execute a SQL query
@@ -136,14 +133,19 @@ version, not a difference in the underlying idea.
 
 \end{tikzpicture}%
 }
-\caption[The agent's reasoning loop]{The agent's reasoning loop. The model chooses exactly one
-tool call per step; \texttt{run\_sql} and \texttt{inspect\_schema}
-feed their results back into another round of reasoning, while
-\texttt{conclude} and \texttt{propose\_action} end the loop. This is
-the same perceive-decide-act-observe cycle the local prototype in
-Chapter~\ref{chapter:BF-DFP} used --- only the mechanism for expressing ``the next
-action'' changed.}
+\caption{The agent's reasoning loop. \texttt{run\_sql} and
+\texttt{inspect\_schema} feed back into another round of reasoning;
+\texttt{conclude} and \texttt{propose\_action} end it.}
 \label{fig:agent-loop}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/ch5-steps-panel-b.png}
+\caption{The steps panel under a finished answer. The first \texttt{run\_sql}
+returned no rows and is left visible rather than hidden.}
+\label{fig:ch5-steps-panel}
 \end{figure}
 
 Figure~\ref{fig:agent-loop} is the theory. Figure~\ref{fig:ch5-steps-panel}
@@ -151,17 +153,6 @@ is what it actually looks like when the loop runs against a real
 question --- every \texttt{run\_sql} step gets logged and shown to the
 user, so the loop is not a black box even though the reasoning behind
 each step is not shown in full.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.8\textwidth]{figures/ch5-steps-panel-b.png}
-\caption[The steps panel under a finished answer]{The steps panel expanded under a finished answer. Both \texttt{run\_sql}
-iterations are logged before the model called \texttt{conclude} --- including the
-first, which returned no rows and sent the agent back to write a different query
-against another table. The failed attempt is left visible rather than hidden.}
-\label{fig:ch5-steps-panel}
-\end{figure}
-
 \section{Knowing When Not to Answer Yet}
 
 The first decision the loop makes is not which query to run. It is whether
@@ -182,27 +173,30 @@ So before running anything, the agent checks whether it should ask first.
 Three gates, cheapest first, and most questions pass straight through all
 three without paying for any of them:
 
-\begin{itemize}
-    \item \textbf{A threshold the human should set.} Questions phrased
-    around ``high ARPU,'' ``heavy data users'' or ``above average'' get a
-    number input rather than a guess. This one exists because relative
-    baselines are actively misleading on skewed data: a handful of very
-    high-spending subscribers drag the mean up, so ``above average ARPU''
-    silently excludes customers a human would obviously count. The
-    operator types the cutoff, with a ``let the agent choose a sensible
-    one'' fallback for when they genuinely do not care.
-    \item \textbf{A breakdown with no stated dimension.} ``Show me a
-    drilldown of subscribers'' names no axis to break down by, so the
-    agent offers a small catalog of real drill paths --- by region, by
-    technology, by value segment. This gate is a plain lookup, no model
-    call, so it costs nothing.
-    \item \textbf{Genuine vagueness.} ``What should we focus on,''
-    ``biggest problems,'' ``where is there opportunity.'' Only these
-    reach a model call, and only after a keyword pre-filter
-    (\emph{best}, \emph{worst}, \emph{improve}, \emph{biggest},
-    \emph{priorit\ldots}) decides the question is vague enough to be
-    worth the latency. A specific question never pays for this check.
-\end{itemize}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{2.9cm}p{4.5cm}p{5.0cm}@{}}
+\toprule
+\textbf{Trigger} & \textbf{Looks like} & \textbf{What the agent does} \\
+\midrule
+Threshold only a human can set
+& ``high ARPU'', ``heavy data users'', ``above average''
+& Asks for a number, with a ``pick a sensible one for me'' fallback \\
+\addlinespace
+Breakdown with no dimension
+& ``show me a drilldown of subscribers''
+& Offers the real drill paths --- region, technology, value segment \\
+\addlinespace
+Genuine vagueness
+& ``what should we focus on'', ``biggest problems''
+& Asks the model what is actually being requested \\
+\bottomrule
+\end{tabular}
+\caption{The three cases where the agent asks before it queries.}
+\label{tab:clarify-gates}
+\end{table}
+
 
 % =====================================================================
 % SCREENSHOT NEEDED --- figures/ch5-clarify.png
@@ -212,18 +206,25 @@ three without paying for any of them:
 % plus the list of option buttons, ideally with the answer that follows
 % after picking one visible underneath.
 % =====================================================================
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
-\includegraphics[width=0.85\textwidth]{figures/ch5-clarify.png}
-\caption[The agent declining to guess]{The agent declining to guess: asked for ``5G upsell
-opportunities by region,'' it offers three concrete readings of the
-question plus an explicit ``just decide for me,'' and only runs a query
-once one is chosen.}
-\label{fig:ch5-clarify}
+\includegraphics[width=0.85\textwidth]{figures/ch5-clarify1.png}
+\caption{The agent declining to guess: three readings offered for ``5G upsell
+opportunities by region'' before any query runs.}
+\label{fig:ch5-clarify-ask}
 \end{figure}
 
-Two details make this behave like a tool rather than a chatbot demanding
-a conversation.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/ch5-clarify2.png}
+\caption{The answer, once a reading is chosen.}
+\label{fig:ch5-clarify-answer}
+\end{figure}
+
+
+There are two details that make it behave like a tool/agent rather than 
+a chatbot answering simple questions.
+
 
 The options are \emph{complete standalone questions}, not dialogue turns.
 Clicking ``High-value customers with 5G-capable devices but not on 5G
@@ -272,31 +273,32 @@ relevant to the current question, an intent classifier routes a
 question toward the network side, the commercial side, or both, and a
 hybrid search index --- BM25~\cite{bm25} keyword matching and FAISS-based
 vector search~\cite{faiss}, merged --- surfaces telecom-specific SQL
-patterns on demand. This half handles \emph{knowledge} gaps, not
-reasoning ones.
+patterns on demand. However this approach only half handles the knowledge gaps,
+and it doesn't even work on the reasoning ones.
 
-Why bother splitting these two apart instead of just cramming
-everything into one long prompt? Because a knowledge gap and a
-reasoning gap need different fixes, and mixing them up leads to
-whack-a-mole: patch one bad query with a hardcoded example, and the
-next slightly different question breaks the exact same way. A general
-principle generalizes. A one-off example does not.
+One might ask why should they be seperate when we can just cram 
+everything into one long prompt? It's because a knowledge gap and a 
+reasoning gap need different fixes, and mixing them up will lead 
+to a whack-a-mole situation: you patch one bad query with a 
+hardcoded example, and a slightly different question breaks it 
+the same way. Having a general principle would generalize, but a one-off
+example doesn't. 
 
-There is a third, smaller mechanism sitting between those two, and it exists
-because of a failure neither of them caught. Asked to recommend a retention
-offer, the agent would name a real product from the catalogue --- the names are
-in the schema, so it had those --- and then simply invent the terms attached to
-it. It proposed a 20\% discount on an offer the catalogue records at 15\%, and
-30~GB of bonus data on one that carries 50. Plausible, internally consistent,
-and wrong.
 
-This is not a reasoning gap and it is not a retrieval gap either. The offer
-catalogue is ten rows, and the model had no way of knowing what was in them
-because nothing had ever put them in front of it. So the startup data profile
-now carries the whole catalogue verbatim --- every active offer with its real
-discount, bonus allowance, validity window and target technology --- right
-alongside the column statistics it was already gathering. Ten rows cost nothing
-to include, and they take away the reason to guess.
+A third, smaller mechanism sits between those two, and it exists because of a
+failure neither of them caught. Asked to recommend a retention offer, the agent
+would name a real product from the catalogue --- the names are in the schema, so
+it had those --- then simply invent the terms attached to it. It proposed a
+20\% discount on an offer the catalogue records at 15\%, and 30~GB of bonus data
+on one that carries 50. Plausible, internally consistent, and wrong.
+
+This is neither a reasoning gap nor a retrieval gap. Retrieval surfaces schema
+--- table names, columns, join paths --- and the terms are row values, which it
+never looks at. The catalogue is ten rows, so the fix was to stop retrieving
+anything and put the whole thing in the system prompt.
+
+
+
 
 The general form of that fix is worth stating, because it recurs: when a small
 reference table governs what the agent is allowed to claim, putting the table in
@@ -313,37 +315,21 @@ does not eliminate them, so the loop also has to catch what slips
 through, on both ends: before a query runs, and before an answer
 reaches the user.
 
-Before a query runs, every SQL statement the model writes gets checked
-against the real schema first. If it references a column that does
-not exist --- something models do fairly often when a table has a lot
-of similarly-named fields --- the check fails before anything executes,
-and the real column names of that table get fed back to the model
-so it can correct itself on the next step rather than guessing again
-blind.
+Before a query runs, every SQL statement is checked against the real schema. If
+it references a column that does not exist --- something models do often when a
+table has many similarly-named fields --- the check fails before anything
+executes, and the real column names are fed back so the model can correct itself
+rather than guess again.
 
-After a query runs, there is a second check aimed at the answer text
-itself: does every number the model cites in its final answer actually
-appear somewhere in the rows it just queried? If more than half of the
-significant numbers in an answer cannot be traced back to real data,
-that answer gets regenerated once, this time explicitly restricted to
-only the numbers actually present in the results.
+After a query runs, a second check reads the answer itself. Does every number it
+cites appear in the rows just queried? Does any negative claim --- ``there are
+no active alarms'' --- rest on a query that actually looked? If more than half
+the significant numbers cannot be traced, or a negative claim was never checked,
+the answer is regenerated once, restricted to what the results contain.
 
-That second check exists because of a very concrete failure mode this
-project ran into directly. Even with the four tools in place, the model
-would sometimes still call \texttt{conclude} correctly, but instead of
-using the structured \texttt{chart} or \texttt{recommendations} fields
-it was given, it would write the entire answer --- prose, a numbered
-recommendations list, and a raw JSON strategy-diagram spec --- all
-crammed into the plain \texttt{text} field. The practical result: a
-question like ``5G upsell opportunities by region'' would come back
-with a clean paragraph of analysis followed by a wall of unrendered
-JSON dumped straight into the chat. The fix walks the text field for
-exactly this pattern --- a labeled block followed by a JSON object ---
-lifts it into the field it was actually meant for, and strips it out of
-the text; a numbered ``Recommendations:'' list gets the same treatment.
-Anything that still looks like a stray JSON object after that gets
-hard-stripped as a last resort, so raw JSON can no longer reach the
-chat under any circumstance. Verified against the exact leaked output
+The system prompt already told the model to claim only what it had queried. It
+still didn't. The difference is that a prompt asks and this check does not.
+ Verified against the exact leaked output
 that triggered this fix, plus a handful of regression cases to make
 sure well-formed answers were left untouched.
 
@@ -410,9 +396,8 @@ describe one.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch5-chart-example.png}
-\caption{A Plotly chart attached to a \texttt{conclude} call, built
-directly from the query results rather than left for the model to
-describe in words.}
+\caption{A Plotly chart attached to a \texttt{conclude} call, built directly
+from the query results.}
 \label{fig:ch5-chart}
 \end{figure}
 
@@ -433,12 +418,8 @@ rather than a static image.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch5-mindmap-example.png}
-\caption[The drill-down mind map]{The drill-down mind map, in its radial layout with one region
-expanded into its technology split. What a page cannot show is that this
-is not a picture: every node expands and collapses on click, the layout
-toggles between radial and tree, and the tree can be re-rooted into a
-single branch, fitted, exported, or opened fullscreen. The figure is one
-frame of something the user drives.}
+\caption{The drill-down mind map, one region expanded. Every node opens on
+click --- this is one frame of something the user drives.}
 \label{fig:ch5-mindmap}
 \end{figure}
 
@@ -519,13 +500,7 @@ having arrived there over MQTT from the chat server.}
 \label{fig:ch5-ops-review}
 \end{figure}
 
-Why MQTT specifically, rather than just having the chat server write to
-the database directly? Because the two servers are meant to stay
-decoupled: the chat portal proposes, the ops portal decides and
-executes, and the message bus between them is the only thing they
-actually share. Approve it in the review queue, and the campaign or SMS
-gets written for real; deny it, and nothing happens at all --- the
-agent's proposal simply expires unactioned.
+
 
 \section{Staying Fast: the Fast Path and the Semantic Cache}
 

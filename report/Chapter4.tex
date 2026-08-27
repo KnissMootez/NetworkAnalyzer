@@ -18,27 +18,14 @@ with that world, this chapter covers what the world itself actually
 does on its own.
 
 \section{Why a Static Database Was Never Going to Be Enough}
-
-The synthetic databases described in Chapter
-\ref{chapter:BF-DFP} gave the project
-something to query, but a database that only changes when someone
-manually re-runs a generation script is still, for all practical
-purposes, a snapshot. A demo built on a snapshot has a specific and
-fairly embarrassing failure mode: ask the same question twice in a
-row, and if the assistant has quietly cached or half-remembered the
-first answer, the second answer had better still be correct --- except
-on a snapshot, ``correct'' never moves, so that guarantee is trivial
-and proves nothing. It does not test whether the agent is actually
-looking, only whether it can repeat itself.
-
-That is the real reason \texttt{db\_simulator.py} exists: not as a
-cosmetic touch to make the demo look more alive, but as a way of making
-staleness actually possible, so that avoiding it becomes a real,
-checkable property of the agent rather than an assumption nobody ever
-tested. If the numbers never change, an agent that silently memorizes
-its first answer and repeats it forever looks exactly as correct as one
-that queries the database honestly every single time. A moving target
-is the only way to actually tell the two apart.
+The database created from Chapter 
+The synthetic databases from Chapter~\ref{ch:database} gave the project
+something to query, but a database that only changes when someone re-runs a
+generation script is just a snapshot. Real networks don't sit still, so ours
+shouldn't either. There's a less obvious reason too: if the numbers never move,
+an agent that quietly memorized its first answer looks exactly as correct as one
+that queries the database honestly every time. A moving target is the only way
+to tell those two apart --- which is what \texttt{db\_simulator.py} is for.
 
 \section{The Tick Loop}
 
@@ -53,17 +40,16 @@ slice of the two databases:
     (throughput, latency, drop rate) get nudged, faults get raised on
     cells, and the two are wired to each other in both directions
     (Figure~\ref{fig:ch4-alarms}).
-    \item \textbf{Usage} --- monthly data and voice usage accumulate
-    for a rotating sample of subscribers, the same way real usage
-    would build up gradually over the course of a billing month rather
-    than jumping straight to a final total.
+    \item \textbf{Usage} --- this updates montly data and voice usage for a rotating
+    number of subscribers, relatively like real usage would build up gradually over
+    the course of a month, rather than getting an impulse.
     \item \textbf{Churn rescoring} --- every affected subscriber's
-    churn risk gets recomputed against their latest activity, not
-    left stale from whenever it was last calculated.
-    \item \textbf{New subscribers} --- occasionally, a tick creates a
-    brand-new subscriber record from scratch, across both databases at
-    once, so the subscriber base itself is not a fixed 50{,}000-row
-    pool that only ever shrinks.
+    churn risk gets calculated again, based on their latest activities, and 
+    how network KPIs affect thenm, not left stale from whenever it was last 
+    calculated.
+    \item \textbf{New subscribers} --- occasionally, the database may get or lose 
+    a new subscriber, it gets created from scratch and added to both databases at once, so the 
+    50{,}000 isn't a fixed number either.
     \item \textbf{The calendar} --- the simulator keeps its own notion
     of ``today,'' and that notion advances tick by tick independently
     of the real-world date. A month can complete and roll over inside
@@ -80,22 +66,16 @@ slice of the two databases:
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch4-alarms.png}
-\caption[Active alarms per 100 cells, by region]{The analytics dashboard's network view, built from data the simulator
-is actively updating tick by tick. Alarms are shown as a \emph{rate} --- active alarms
-per 100 cells --- because a raw count simply ranks regions by how many cells they
-have: Ba Sing Se holds a fifth of the network and tops any count chart by
-construction. Normalized, the least healthy region is Omashu. Regions above the
-network-wide rate are highlighted; hovering any bar gives the underlying counts.}
+\caption{Active alarms per 100 cells by region, from live simulator data.
+Omashu leads once normalized.}
+
 \label{fig:ch4-alarms}
 \end{figure}
 
-None of these updates are dramatic on their own --- a KPI shifting by a
-few percentage points, one more alarm, a handful of subscribers with
-slightly higher usage. The point is not any single tick, it is that
-the process never stops. Ask the agent the same question an hour apart
-and there is a real chance the honest answer is a different number,
-which is exactly the property a demo running on a static snapshot could
-never have offered.
+These updates aren't dramatic on their own, but with enough time, it accumulates a more 
+interesting result, asking the agent the same question a minute apart won't change much,
+but an hour, it'll show significant change, something a static database could never offer.
+
 
 % =====================================================================
 % SCREENSHOT NEEDED --- figures/ch4-simulator-tick.png
@@ -108,9 +88,8 @@ never have offered.
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/ch4-simulator-tick.png}
-\caption{\texttt{db\_simulator.py} running its tick loop in a terminal,
-continuously updating both databases while the agent stays live against
-whatever the current tick has produced.}
+\caption{\texttt{db\_simulator.py} running its tick loop, continuously updating
+both databases while the agent stays live.}
 \label{fig:ch4-simulator}
 \end{figure}
 
@@ -121,19 +100,12 @@ drifting slightly --- it is a full incident lifecycle, built so the
 agent can be asked something like ``do we have any high-value
 customers having streaming issues right now'' and get a real, current,
 truthful answer.
-
-Every incident lives in a dedicated \texttt{experience\_incidents}
-table and carries a root cause, an affected service (video streaming,
-mobile data, voice calls, or all services), a severity, and a full
-timestamp trail: \texttt{started\_at}, an \texttt{expected\_}
-\texttt{resolution\_at} the simulator commits to when the incident
-opens, and a \texttt{resolved\_at} that only gets filled in once it
-actually heals. Nothing about an incident is a lone flag flipped on a
-row --- opening one lays down a coherent trail of evidence around it,
-consistent with a single cause: a run of poor quality-of-experience
-scores for the affected service, a matching service-interruption
-record, and, for anything serious enough, a customer complaint linked
-back to the same incident. Asking the agent to explain \emph{why} a
+Every incident lives in an \texttt{experience\_incidents} table, it has a root 
+cause, an affected service, a severity and a full timestamp trail. But one incident
+can't really be a lone flag on a row: opening one also lays down a run of poor 
+QoE scores for that service, a matching service-interruption, and, if it's serious enough,
+a customer complaint is also filed. 
+. Asking the agent to explain \emph{why} a
 customer's experience looks bad is meant to hold together as a story,
 not just a single suspicious number.
 
@@ -152,24 +124,33 @@ agent.
 The fix was to give every incident a defined \emph{scope}, matching how
 that class of fault actually behaves in a real network:
 
-\begin{itemize}
-    \item \textbf{Site-scoped} (power failure, site outage) ---
-    every active subscriber served by every cell on that site goes
-    down together. Rare by design (roughly 2\% of new incidents), since
-    a real outage at that scale is not a common event.
-    \item \textbf{Cell-scoped} (congestion, backhaul degradation,
-    signal interference) --- every active subscriber on that one cell
-    is affected. Deliberately weighted toward busier cells, since a
-    congestion event is naturally more likely to happen where there
-    are more people to congest.
-    \item \textbf{Subscriber-scoped} (throughput throttling, a DNS or
-    CDN hiccup, a dropped VoLTE bearer) --- exactly one customer,
-    biased toward high-value ones, the segment retention questions
-    actually care about. ``High-value'' here is not a fixed ARPU
-    threshold but the top decile of the live distribution, re-tested
-    whenever a subscriber's revenue moves --- so the label keeps
-    meaning something even as ARPU drifts.
-\end{itemize}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{3.1cm}p{4.9cm}p{5.4cm}@{}}
+\toprule
+\textbf{Scope} & \textbf{Who it affects} & \textbf{How the simulator picks it} \\
+\midrule
+\textbf{Site}\newline{\footnotesize power failure, site outage}
+& Every active subscriber on every cell at that site
+& \(\sim\)2\% of new incidents --- an outage that big is rare \\
+\addlinespace
+\textbf{Cell}\newline{\footnotesize congestion, backhaul degradation, interference}
+& Every active subscriber on that cell
+& Weighted toward busier cells, where congestion actually happens \\
+\addlinespace
+\textbf{Subscriber}\newline{\footnotesize throttling, DNS or CDN hiccup, dropped VoLTE bearer}
+& One customer
+& Biased toward high-value subscribers \\
+\bottomrule
+\end{tabular}
+\caption{Incident scopes and how the simulator selects them.}
+\label{tab:incident-scopes}
+\end{table}
+
+``High-value'' here is not a fixed ARPU threshold but the top decile of the live
+distribution, re-tested as revenue moves --- so the label keeps meaning
+something even as ARPU drifts
 
 Once a site- or cell-scoped incident fires, every subscriber caught in
 its blast radius gets a consistent snapshot of the incident attached to
@@ -198,18 +179,16 @@ does not disappear with it.
 
 The blast-radius problem had a sibling that hid for much longer. Alarms
 and KPIs both looked fine on their own --- the alarms table filled up,
-the KPI numbers moved --- so neither invited a second look. But they
-were never connected to each other. Each tick raised an alarm on a cell
-picked uniformly at random, wrote the row, and stopped there, while the
-KPI generator rolled its own separate dice and never read the alarms
-table. Two independent random processes, presented as one story about
-network health. The giveaway was in the data: cells carrying an active
-\emph{critical} alarm measured a slightly \emph{lower} drop rate than
-cells with no alarm at all --- an inverted correlation, which is what
-noise looks like when you go looking for a relationship that was never
-there. And since cells were picked from the whole network rather than
+the KPI numbers moved --- so neither invited a second look. But the issue is 
+that they never linked/synced with each other, this means that each tick raised
+an alarm on a cell picked randomly, wrote the row, and stopped there, while 
+the KPI generator rolled its own seperate dice and never read the alarms this table.
+The giveaway was clear in the data though: cells carrying an active \emph{critical}
+alarm measured a slightly \emph{lower} drop rate than cells with no alarm at all.
+This of course made no sense and had to be fixed. And since cells were picked from the whole network rather than
 the parts of it serving people, 62\% of alarms sat on cells with zero
 subscribers on them.
+
 
 Fixing it meant wiring the two together in both directions, because
 real faults work both ways. Equipment faults --- a power failure, a
@@ -227,28 +206,22 @@ way, a detector reads each cell-day and raises the alarm those numbers
 deserve.
 
 One detail there is worth keeping, because the obvious approach fails
-quietly. Thresholds have to be relative to the technology, never
-absolute: a 1.9\% drop rate is a broken 5G cell and a completely
-ordinary 2G one. A flat ``drop rate above 2\%'' rule currently flags
-188 2G cells, 45 3G cells and 50 4G cells --- and not one of those
-188 2G cells is under an alarm, while every single one of the 50 4G
-cells is. So the rule does find the real faults, and then buries them
+quietly. Thresholds need to relative to the technology and not absolute: a 
+1.9\% drop rate is a broken 5G cell and a completely ordinary 2G one. A flat ``
+drop rate above 2\%'' rule currently flags 188 2G cells, 45 for 3G and 50 for 
+4G, and not one of those 2G is under an alarm, while the 4G ones, all of them are 
+under an alarm. So the rule works and does find real faults, and then buries them
 under nearly four times as many cells whose only crime is being 2G.
 Every threshold is therefore expressed against that technology's own
 healthy baseline.
 
-Worth admitting, since it explains how the whole thing went unnoticed:
-the KPI update function had never actually written a row. The table it
-writes to was missing a uniqueness constraint its upsert depended on,
-the database helper swallowed the resulting error, and the function
-went on reporting how many cells it had updated every tick regardless.
-A process that reports success while doing nothing is worse than one
-that crashes, and the helpers now print real errors instead of
-retrying past them. With that fixed and the coupling in place, cells
-under an active alarm run between 1.4 and 2.1 times the drop rate of
-clean cells depending on the technology --- and almost every active
-alarm now sits on a cell that actually serves somebody, 1{,}089 out of
-1{,}099.
+One bug is worth admitting: the KPI update function had never written a single
+row. Its upsert depended on a uniqueness constraint the table didn't have, the
+database helper swallowed the error, and the function went on reporting success
+every tick. The helpers now print real errors instead of retrying past them.
+With that fixed, cells under an active alarm run 1.4 to 2.1 times the drop rate
+of clean cells, and 1{,}089 of 1{,}099 active alarms sit on a cell that actually
+serves somebody.
 
 
 \section{Churn Tracks the Live World, Not Just Usage}
@@ -278,19 +251,11 @@ never reads incidents, and the penalty never reads commercial history, so
 neither signal is counted twice.
 
 \section{Seeing It on the Map}
+The coverage map associated to the work is not just a static look, it
+represents multiple things: the cell site locations, showing density in 
+certain cities, as well as current alarms, clicking on a ring will immediately
+prompt the agent to investigate the said alarm, searching up root cause as well as suggesting solutions.
 
-The coverage map inherited from Chapter
-\ref{chapter:BF-DFP}'s fictional-geography design
-is not just a static backdrop --- it reflects the incident log live.
-Sites with an active incident get a pulsing ring, colored and animated
-by severity, and the map can be switched into an ``issues only'' view
-that fades out everything healthy and shows exclusively the sites
-currently in trouble. Clicking a ring asks the agent directly to
-explain that incident and how to address it, which is a small detail
-but not a cosmetic one: it means the agent's answers about live issues
-and what the map is currently showing are always describing the exact
-same data, because both are reading off the same table at the moment
-the question is asked.
 
 % =====================================================================
 % SCREENSHOT NEEDED --- figures/ch4-map-flash.png
@@ -316,14 +281,13 @@ of a simulated month rather than existing fully formed from day one,
 there is a real and slightly counterintuitive consequence worth naming
 directly: a question asked on the second day of a new simulated month
 legitimately returns a much smaller number than the exact same question
-asked on the last day of the previous one. Read in isolation, a ``top
-data user this month'' answer of a few gigabytes early in a cycle can
-look like the agent got it wrong, when it is in fact reporting a
-partial month correctly and honestly. This came up directly during
-testing: an answer citing a small usage figure for a specific
-subscriber looked, at first glance, like a fabricated number, until
-checking the live database confirmed it was exactly correct for how
-far into the month the simulation currently was. Knowing the data is
+asked on the last day of the previous one. When read in isolation, a ``
+top data user this month'' answer of a few gigabytes early in a cycle 
+can look like the agent got it wrong, when in reality, it was the correct 
+answer, just not logically. This came up directly while testing: an 
+answer citing a small usage figure for a specific subscriber 
+looked like the number was hallucinated at first glance, but checking the 
+database it was correct, as the month had just begun.  Knowing the data is
 genuinely live --- not stale, not wrong, just incomplete for the
 current period --- is what keeps a correct answer from being misread
 as a bug.

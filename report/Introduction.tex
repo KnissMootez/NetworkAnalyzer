@@ -72,30 +72,19 @@ The produced deliverables are:
 The rest of this report follows the order the work actually happened, rather than
 a tidy after-the-fact architecture.
 
-\textbf{Chapter~\ref{ch:context}} covers the host organization and the context the
-project sits in --- what SmartCare is, and why building against it directly was
-never an option.
-
-\textbf{Chapter~\ref{ch:related}} positions the work against existing research in
-text-to-SQL, language-model agents, and retrieval-based grounding, and is explicit
-about which parts of the design are established technique and which are not.
-
-\textbf{Chapter~\ref{chapter:BF-DFP}} lays the foundation: two synthetic databases
-modelled on TM Forum's abstractions, a first agent loop running on a local model
-to prove the idea works, and then the move to cloud inference once local hardware
-turned out to be the ceiling rather than the idea itself.
-
-\textbf{Chapter~\ref{ch:livingdb}} turns that static data into a living environment
---- a simulator that keeps KPIs, alarms, incidents and churn moving, so the
-assistant is always reading a target that never sits still.
-
-\textbf{Chapter~\ref{ch:agent}} covers the agent itself: the reasoning loop, how it
-grounds its queries in the real schema instead of guessing, how it catches its own
-mistakes before they reach the user, and everything it can do beyond answering in
-plain text.
-
-\textbf{Chapter~\ref{ch:eval}} measures all of it against a golden set, reports
-where it fails, and documents a churn model that was found not to transfer.
-
-\textbf{Chapter~\ref{ch:limits}} sets out what the system does not do, what that
-costs, and what would have to happen next.
+The \textbf{1st chapter} covers the host organization as well as the context the 
+project sits in, what SmartCare is, and why building against it was never really 
+an option. Then the \textbf{2nd chapter} postions the work against existing 
+reasarch in text-to-SQL, language model agents and retrieval based grounding, this chapter
+is also explicit about which parts of the design are established techniques and 
+which one are not. In the \textbf{3rd chapter}, some foundations are laid: two synthetic
+databases are created and modeled on TM Forum's abstractions, a first prototype of an agent 
+loop running on a local model to prove the idea works, then moving to cloud inference after 
+facing issues with the local hardware. The \textbf{4th chapter} turns the databases created into 
+a living environment: a simulator that keeps KPIs, alarms, incidents and churn moving, to give 
+the assistant a target that is always dynamic, imitating real life. Then the \textbf{5th chapter}
+covers the agent itself, how it grounds its queries in the real schema instead of guessing, 
+how it catches AND corrects its mistakes before reaching a conclusion for the user, as well as what it can 
+do beyond plain text. \textbf{6th chapter} measures all of the work against a golden set, reports 
+where it fails, and documents a churn model that was found not to transfer. \textbf{7th chapter} covers limitations, 
+what wasn't achieved and how it can be improved.

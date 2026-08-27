@@ -159,24 +159,17 @@ The harness was written to measure the agent. It spent most of its first few
 runs finding faults everywhere except the agent, which is itself a decent
 argument for building one.
 
-Its very first run failed all sixteen cases with \texttt{Unable to locate
-credentials}. The harness had never loaded the environment file that holds them,
-because the web server was the only other entry point and it loads them itself.
-That one missing line is the whole reason the evaluation in this project had
-never been run before.
+The first run failed all sixteen cases with an \texttt{Unable to 
+locate credentials} error. The harness didn't load the env file. Therefore the web server 
+was the only other entry point, meaning nothing was caught, a 
+certain missing line is why this eval had never been run. 
 
-Two more cases then failed on counts. The agent reported 3{,}162 subscribers on
-5G where the reference said 3{,}204, and the agent was right. The reference
-counted rows in \texttt{subscriber\_technology} directly; the agent joined to
-\texttt{subscribers} the way it should. The gap is 371 orphaned rows across that
-table --- technology records whose subscriber no longer exists, left behind by
-an older identifier migration that never cascaded. So the evaluation found a
-defect in the data, not in the answer.
+Two cases then failed on counts. First one, the agent reported 3,162 subscribers 
+on 5G, while the reference was 3,204. The agent was right though. The reference counted 
+\texttt{subscriber\_technology}  rows directly; the agent joined
+\texttt{subscribers}. The difference is 371 orphaned rows, left by an
+identifier migration that never cascaded.
 
-A third run turned up a crash: a single arrow character in a model response
-triggered an encoding failure on Windows, silently dropping the agent from its
-tool-calling path down to the older text-parsing fallback. In normal use this is
-completely invisible --- the answer still arrives, just by a worse route.
 
 Not one of those three would have been found by asking the assistant questions
 and reading the answers, which is how everything else in this project got
@@ -346,43 +339,25 @@ Low    & 34{,}958 &  8.7\% & 110.6 & 1{,}481 d \\
 \label{tab:churn-bands}
 \end{table}
 
-Unpaid bills separate by a factor of four across the bands, which is the
-scorecard doing its job. Average ARPU does not separate at all, and that is
-worth saying out loud rather than hiding: the heaviest term in the whole
-scorecard contributes nothing measurable in this environment.
+Unpaid bills separate by a factor of four across the bands. Average ARPU does
+not separate at all --- and ARPU decline is the heaviest term in the scorecard.
 
-The reason is a property of the simulator, not of the scorecard. Every subscriber's
-ARPU is advanced by the same random drift each month, so while the series is
-continuous --- month-to-month correlation of 0.998, against 0.15 for the raw
-billing amounts, which is why the scorecard reads \texttt{customer\_value} rather
-than \texttt{billing} --- there is no subpopulation whose spend systematically
-declines. There are no declining customers in this world for a decline term to
-find.
+The reason is the simulator, not the scorecard. Every subscriber's ARPU is
+advanced by the same random drift each month (month-to-month correlation 0.998,
+against 0.15 for raw billing --- which is why the scorecard reads
+\texttt{customer\_value} rather than \texttt{billing}), so no subpopulation
+systematically declines. There are no declining customers for a decline term to
+find. That leaves 0.60 of the total weight --- ARPU 0.35, data 0.15, voice 0.10
+--- resting on structure that isn't there. What actually separates the bands is
+the remaining 0.40: unpaid bills, engagement and tenure.
 
-That is a limitation of the synthetic environment rather than of the method, and
-it is the clearest example in this whole report of what synthetic data cannot
-do. A generator can produce data that looks perfectly realistic in its
-distributions and still contain none of the structure a model is supposed to
-detect. On real subscriber data the ARPU term would be expected to carry most of
-the signal. Here it carries none, and no amount of tuning would ever reveal a
-pattern that was never generated in the first place.
+This is the clearest example in the report of what synthetic data cannot do. A
+generator can produce perfectly realistic distributions and still contain none
+of the structure a model is supposed to detect.
 
-Which means, being blunt about it, that most of the weighting is doing nothing
-here. ARPU decline at 0.35, data decline at 0.15 and voice decline at 0.10 come
-to 0.60 of the total, and all three rest on the same missing structure. What is
-actually separating the bands is unpaid bills, engagement and tenure --- the
-remaining 0.40. On real data those decline terms would be expected to carry most
-of the signal, which is why they are weighted the way they are; in this world
-they carry none, and no amount of tuning would reveal a pattern that was never
-generated in the first place.
-
-It is worth being equally clear about what this component is and is not. It
-ranks subscribers by risk factors that can be observed and explained, which is
-useful for prioritising who to look at first. It is not a validated predictor of
-churn, and Chapter~\ref{ch:limits} sets out why it cannot be one in this
-environment. It is one data source among several that the agent can reach and
-reason over --- which is the actual subject of this report --- rather than a
-result in its own right.
+So this component ranks subscribers by risk factors that can be observed and
+explained. It is not a validated predictor of churn --- Chapter~\ref{ch:limits}
+says why it cannot be one here.
 
 
 \section{Threats to Validity}
@@ -394,12 +369,11 @@ of questions an operator might ask. It is enough to establish that factual
 retrieval and safety hold and that hallucination resistance does not; it is not
 enough to state a confidence interval on any of those.
 
-\textbf{The environment is synthetic.} Ground truth is computable precisely
-because the data was generated. On a real network, the reference itself would be
-contested, and the same harness would be considerably harder to build.
+\textbf{The environment is synthetic.} Ground truth is computable 
+because simply the data was generated. On a real network, the reference itself
+would be contested.
 
-\textbf{The agent is not deterministic.} The same question can take a different
-query path on a different run. During this evaluation one question was observed
-answering correctly on one run and incorrectly on another, with no change in
-between. A single pass therefore measures one sample of the agent's behaviour, not
-its behaviour.
+\textbf{The agent is not deterministic.} The same question can go either way.
+During this evaluation one question was observed with a correct answer and incorrect 
+on another, with no change in between. 
+

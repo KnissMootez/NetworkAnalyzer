@@ -2171,8 +2171,13 @@ def _insert_new_subscriber(verbose=False):
     cell_id = cell[0][0] if cell else None
 
     # ── NetworkAnalyzer DB ─────────────────────────────────────────────────────
-    sc_write("INSERT OR IGNORE INTO subscribers VALUES (?,?,?,1,?,?,?,?,?,?)",
-             (msisdn, imsi, "SIM", now, region, city, lat, lon, area_code))
+    # Column list is explicit: VALUES(...) silently went stale when `nation` was
+    # added, so every new subscriber failed to insert while the technology,
+    # device and usage rows below still went in -- creating orphans each tick.
+    sc_write("INSERT OR IGNORE INTO subscribers "
+             "(msisdn, imsi, sim_type, is_active, activation_date, region, city, "
+             "latitude, longitude, area_code, nation) VALUES (?,?,?,1,?,?,?,?,?,?,?)",
+             (msisdn, imsi, "SIM", now, region, city, lat, lon, area_code, nation))
     sc_write("INSERT OR IGNORE INTO subscriber_technology VALUES (?,?,?,?,?,?)",
              (msisdn, tech, cell_id, 0, 0, now))
     sc_write("INSERT OR IGNORE INTO devices VALUES (?,?,?,?,?,?,?,?,?,?)",

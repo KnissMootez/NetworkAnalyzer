@@ -12,6 +12,12 @@ So where does this project actually sit? This chapter places the work against
 the research it borrows from, and is upfront about which parts are established
 technique and which parts are ours.
 
+Natural language being prompted to a database isn't exactly new, and neither is putting 
+a language model in a loop so it can do agentic things beyond just answering a question.
+But putting these two ideas together on top of dynamic, operational, constatly changing data,
+seeking answers driving commercial decisions about real customers. So where does this project actually sit? This chapter places the work against
+the research it borrows from, and is upfront about which parts are established
+technique and which parts are ours.
 \section{From Semantic Parsing to Text-to-SQL}
 
 The systems discussed throughout this chapter rest on the transformer
@@ -20,14 +26,14 @@ language models can perform tasks from a handful of in-context examples rather
 than task-specific training\cite{gpt3}, later sharpened by tuning models to
 follow instructions directly\cite{instructgpt}.
 
-Translating natural language into database queries has been studied for decades,
-but the modern framing dates to two benchmark datasets. WikiSQL~\cite{seq2sql}
-paired natural-language questions with SQL over single tables, and demonstrated
-that sequence-to-sequence models could learn the mapping directly.
-Spider~\cite{spider} raised the difficulty substantially by requiring queries
-that span multiple joined tables across databases the model has never seen, which
-made schema generalisation --- rather than sentence parsing --- the central
-problem.
+We've always translated natural language into database queries, been done for decades,
+but for the most modern approach: it dates to two benchmark datasets: WikiSQL~\cite{seq2sql}
+which pairs natural language questions with SQL over single tables, demonstrating that 
+sequence to sequence models could learn the mapping, and Spider-\cite{spider}, which has
+raised the difficulty substantially by requiring a query that would span multiple joined tables
+across databases the model has never seen, which made schema generalisation the central problem,
+rather than sentence parsing.
+
 
 That shift matters a lot for this project. A system that memorises the mapping
 from question phrasing to query template becomes useless the moment the schema
@@ -38,9 +44,7 @@ General-purpose language models proved surprisingly capable at this without
 task-specific training~\cite{llm_text2sql_eval}, and systematic benchmarking has
 since mapped how prompt design, schema representation and example selection each
 move accuracy~\cite{dailsql}.
-DIN-SQL~\cite{dinsql} decomposes a hard question into simpler sub-problems and
-adds a self-correction pass, reporting that decomposition plus correction
-outperforms asking for the whole query in one shot.
+DIN-SQL~\cite{dinsql}, which stands for Decomposed In-Context Learning of Text-to-SQL, basically decomposes a hard question into simpler sub-problems, with a self-correction pass on top. That does better than asking for the whole query in one go.
 
 Our agent follows that same principle without taking the method wholesale: it
 decomposes by taking one action at a time inside a loop rather than asking the
@@ -145,9 +149,8 @@ Human approval before acting   & N/A & N/A & Yes \\
 Published accuracy measurement & Yes & Varies & Partial \\
 \bottomrule
 \end{tabular}
-\caption[Capability positioning against adjacent systems]{Capability positioning. The final row is deliberate: benchmark systems
-report accuracy on standard datasets, and this work reports a measurement narrow
-enough that Chapter~\ref{ch:limits} argues against over-reading it.}
+\caption{Capability positioning. The last row is deliberate --- our
+measurement is narrower than a benchmark score.}
 \label{tab:positioning}
 \end{table}
 

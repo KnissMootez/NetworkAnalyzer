@@ -1,13 +1,12 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}\\networkanalyzer-env\\Scripts\\python.exe",
-  "terminal.integrated.defaultProfile.windows": "NetworkAnalyzer",
+  "python.defaultInterpreterPath": "${workspaceFolder}/networkanalyzer-env/Scripts/python.exe",
   "terminal.integrated.profiles.windows": {
     "NetworkAnalyzer": {
       "source": "PowerShell",
       "args": [
         "-NoExit",
         "-Command",
-        "Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned; & '${workspaceFolder}/networkanalyzer-env/Scripts/Activate.ps1'"
+        "& '${workspaceFolder}/networkanalyzer-env/Scripts/Activate.ps1'"
       ]
     }
   }

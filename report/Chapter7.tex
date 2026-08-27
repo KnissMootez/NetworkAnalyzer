@@ -39,14 +39,15 @@ answer but not in any query result, and claims that something is absent with no
 zero-row query behind them. Both were built after watching the agent actually do
 it, and both work.
 
-Neither one touches the failure the evaluation found most often. Ask for a
-metric the schema does not contain and the agent does not invent a number --- it
-swaps in a neighbouring real one and reports it perfectly accurately. Call setup
-success rate becomes something derived from dropped calls; customer lifetime
-value becomes average revenue per user. Every number is traceable to a real
-query, so every check passes happily. The system has no idea what the question
+Neither one touches the failure the evaluation found most often. When we ask for a 
+metric the schema doesn't contain and the agent doesn't hallucinate a number, it 
+swaps in neighbouring a real one and reports it. For instance call setup success rate 
+becomes something derived from dropped calls; customer lifteime value becomes arpu, etc \dots
+Every number is actualy traceable to a real query, so every check passes happily.
+The system simply doesn't know what the question
 asked for, only what the answer contains, and that is a structural limit rather
 than a missing rule I forgot to write.
+
 
 \subsection{Synthetic Data Cuts Both Ways}
 
@@ -57,14 +58,7 @@ On a live network the reference answer would itself be up for debate.
 
 It also limits every result in here. Real operational data has missing values,
 schema drift and duplicate identities that a generator does not reproduce unless
-somebody sits down and writes them in. The clearest example is the churn work in
-Chapter~\ref{ch:eval}: the heaviest term in the scorecard measures decline in
-spend, and it separates absolutely nothing, because every simulated subscriber
-follows the same revenue drift. There is no declining cohort in this world for a
-decline term to find. A generator can produce data that looks perfectly
-realistic and still contain none of the structure a model is supposed to detect
---- and there is no way to find that out except by going and looking, which is a
-warning that applies to every result in this report.
+somebody sits down and writes them in. 
 
 \subsection{A Model Trained Elsewhere Was Deployed Without Checking}
 
@@ -134,30 +128,18 @@ catalogue fix from Chapter~\ref{ch:agent} generalised: hand the model the
 authoritative vocabulary and check against it, instead of hoping.
 
 \subsection{Making the Churn Signal Validatable at All}
+The scorecard isn't exactly validated, and in this environment it can't be. And that is for 
+two reasons: The simulator has produced a couple of churn events, which isn't a validation set. 
+And it picks who churns by taking bronze subscribers with low ARPU, this is a rule with nothing 
+to do with unpaid bills, spend decline, tenure or engagement, which is everything the scorecard 
+measures. Even with a plethora of events, checking one against another would measure agreement with 
+an arbitrary rule, not anticipation of churn. 
 
-The scorecard is not validated, and in this environment it currently cannot be.
-I originally assumed it could: the simulator deactivates subscribers when they
-churn, so the labelled outcomes must be sitting there waiting. They are not.
-Two problems, and both need the simulator changed before any of this is worth
-attempting.
+The fix is one from the previous subsection: make churn in the simulator follow from things a model could 
+observe: spend falling away, bills going unpaid, a run of bad experience. After that, a declining cohort exists, 
+the events do carry signal, and both the scorecard and a retained model become something measurable. But until then, the honest positionis the one this report takes: the indicator ranks subscribers by 
+observable risk factors, and how well that ranking anticipates real churn is actually unknown.
 
-First there are barely any outcomes --- the simulator has produced a couple of
-churn events, which is not a validation set by anybody's standards. Second, and
-worse, it picks who churns by selecting bronze-segment subscribers with the
-lowest ARPU. That rule has nothing to do with unpaid bills, spend decline,
-tenure or engagement, which is everything the scorecard actually measures. So
-even with thousands of events, checking the scorecard against them would measure
-how well it agrees with an arbitrary rule, not how well it anticipates churn.
-
-The fix has to come first, and it is the same one from the previous subsection:
-make churn in the simulator \emph{caused} by things a model could plausibly
-observe --- spend falling away, bills going unpaid, a run of bad experience ---
-instead of a segment-and-sort. Do that and three things become possible at once:
-a declining cohort exists for the decline terms to find, the churn events carry
-real signal, and both the scorecard and a properly retrained model become
-something you can actually measure. Until then, the honest position is the one
-this report takes: the indicator ranks subscribers by observable risk factors,
-and how well that ranking anticipates real churn is unknown.
 
 \subsection{Towards Something Deployable}
 

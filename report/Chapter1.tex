@@ -35,23 +35,19 @@ user \cite{huawei_smartcare_soc}.
 At its core, SmartCare works through a three-tier indicator framework --- Customer 
 Experience Indicators (CEIs), Key Quality Indicators (KQIs), and Key Performance 
 Indicators (KPIs) --- giving operators a per-service, per-user, per-location view of what 
-is actually happening on the network. On top of that, it covers Quality of Experience 
-(QoE) monitoring, machine learning-assisted fault diagnosis, network Net Promoter Score 
-(NPS) tracking, and self-care integration to take the load off call centers. It's been 
-recognized by Gartner as a Representative Vendor in the Market Guide for CSP Service 
-and Network Assurance Solutions, and is certified under the TM Forum Open Digital 
-Architecture (ODA) component directory \cite{huawei_gartner}\cite{huawei_tmforum} --- 
-so it's not just a niche tool, it's a serious enterprise platform.
+is actually happening on the network. It also covers QoE monitoring, fault
+diagnosis, NPS tracking, and self-care integration. Gartner lists it as a
+Representative Vendor for CSP service and network assurance, and it is certified
+under the TM Forum ODA component directory
+\cite{huawei_gartner}\cite{huawei_tmforum}.
 
-The project developed during this internship builds on top of SmartCare's existing 
-foundation, exploring a new use case within the Sales and Solutions Department: adding a 
-conversational AI layer powered by a Large Language Model (LLM) and a machine 
-learning-based churn prediction module. That was the brief as it stood at the start; 
-what the churn side actually became, and why, is covered in Chapter~
-ef{ch:eval}. The goal is to let sales and solutions engineers 
-query live subscriber and network data in plain language, and proactively surface 
-at-risk subscribers --- extending SmartCare's reach into the pre-sales and account 
-management workflow, where it currently doesn't go.
+This internship builds on that foundation with a new use case for the Sales and
+Solutions Department: a conversational AI layer powered by a Large Language Model
+(LLM), plus a churn prediction module. That was the brief at the start; what the
+churn side actually became, and why, is covered in Chapter~\ref{ch:eval}. The
+goal is to let sales and solutions engineers query live subscriber and network
+data in plain language and surface at-risk subscribers --- extending SmartCare
+into pre-sales and account management, where it currently doesn't reach.
 
 \subsection{Mission and Strategic Vision}
 
@@ -141,22 +137,19 @@ Packet-Switched (PS) architectures in 3G, through Long-Term Evolution (LTE) in 4
 and up to the current deployment of fifth-generation (5G) networks. This progression 
 not only improved bandwidth and latency, but gave rise to an unprecedented volume of 
 operational data --- KPIs, KQIs, network campaigns, and subscriber behavior records 
-accumulating at a scale that traditional tooling was never designed to handle. Network 
-equipment vendors such as Huawei --- which delivered the world's first commercial 
-LTE/EPC network in 2009 and has since supported 5G deployments across more than 170 
-countries --- have accumulated deep expertise in managing these complex, multi-layered 
-infrastructures. Yet the tools used to query, interpret, and act upon the data they 
-produce have historically lagged behind, relying on rigid dashboards, manual reporting, 
-and siloed analyst workflows. SmartCare was built to close that gap on the network 
-operations side --- but the sales layer was still largely untouched.
+accumulating at a scale that traditional tooling was never designed to handle. 
+Network hardware vendors such as Huawe, which delivered the world's first commercial LTE/EPC network 
+in 2009 and has since supported the deployment of 5G as well, across more than 170 countries 
+worldwide, have gathered expertise in managing this complex, multi-layered infrastructures. Yet 
+the tools used to query, interpret and act upon the data they produce have historically been the 
+drawback, relying on dashboards, manual reporting and siloed analyst workflows. SmartCare was built to 
+help close that gap on the network ops side, but the sales layer wasn't really touched.
 
-The emergence of Large Language Models (LLMs) between 2020 and the present has opened 
-a new frontier: the ability to query structured operational data in plain natural 
-language, without requiring SQL expertise or intimate knowledge of database schemas. 
-Beyond just fetching data, an LLM can reason over the results, spot patterns, and 
-give you a conclusion --- helping a sales manager or solutions engineer get to the 
-right answer quickly, without needing a data analyst on standby.
-
+However this changed after the emergence of LLMs between 2020 and the present, a new frontier has opened:
+the ability to query structured operational data in plain natural language, without SQL expertise 
+or intimate knowledge of database schemas. But beyond just fetching data, an LLM can reason over the results, 
+spot patterns and give a conclusion, helping a sales manager or solutions engineer to get to the 
+right question faster, without relying on a data analyst on standby.
 \subsubsection{Socioeconomic and Technological Factors}
 
 Several converging factors shaped the environment in which this project was conceived. 

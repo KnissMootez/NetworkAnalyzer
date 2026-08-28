@@ -1,0 +1,53 @@
+[TRAIN] Loading Indian telecom dataset...
+[TRAIN] 99,999 rows, 226 columns
+[TRAIN] Churn rate: 9.1%  (9,069 churned)
+[TRAIN] After SMOTE: {0: 72744, 1: 72744}
+[TRAIN] 5-fold CV accuracy: 0.9255 (+/- 0.0413)
+
+=======================================================
+  FINAL MODEL RESULTS  (XGBoost, Indian dataset)
+=======================================================
+  Accuracy : 0.9295
+  AUC-ROC  : 0.8845
+  Threshold: 0.6371
+
+  Confusion Matrix:
+    TN=17575  FP= 611
+    FN= 799  TP=1015
+
+  Classification Report:
+              precision    recall  f1-score   support
+
+      active       0.96      0.97      0.96     18186
+       churn       0.62      0.56      0.59      1814
+
+    accuracy                           0.93     20000
+   macro avg       0.79      0.76      0.78     20000
+weighted avg       0.93      0.93      0.93     20000
+
+=======================================================
+
+  Feature importances:
+    arpu_drop_pct        0.3119
+    arpu_m8              0.0992
+    has_roaming          0.0765
+    max_rech_m8          0.0723
+    data_drop_pct        0.0650
+    rech_amt_m8          0.0530
+    rech_drop_pct        0.0434
+    voice_drop_pct       0.0408
+    data_mb_m8           0.0398
+    days_active_m8       0.0384
+    rech_amt_drop_pct    0.0377
+    max_rech_drop_pct    0.0359
+    voice_min_m8         0.0342
+    rech_num_m8          0.0277
+    tenure_days          0.0243
+
+[TRAIN] Global thresholds — high >= 0.5259, medium >= 0.1451
+[TRAIN] Model saved to churn_model.pkl
+[SCORE] Building features from DB...
+[SCORE] Got features for 50,045 subscribers
+[SCORE] Thresholds — high >= 0.5259, medium >= 0.1451
+[SCORE] Distribution — high: 506  medium: 6,111  low: 43,428
+[SCORE] Wrote churn scores for 50,045 subscribers (month=2026-08)

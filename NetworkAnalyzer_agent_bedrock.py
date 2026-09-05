@@ -1,6 +1,19 @@
 import os
+import sys
 import re
 import json
+
+# Windows consoles default to cp1252. A single arrow, bullet or dash in model
+# output raised UnicodeEncodeError inside an ordinary print(), which aborted the
+# tool-calling loop and silently dropped the agent to the text-parsing fallback.
+# The answer still arrived, by a worse route and often with a different query
+# scope, which made it invisible in normal use. Force UTF-8 on the streams.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import time
 import random
 import sqlite3
@@ -361,12 +374,16 @@ def _exec_with_fix(conn: sqlite3.Connection, sql: str) -> tuple[list, str | None
 def query_sc(sql: str) -> list:
     try:
         conn = sqlite3.connect(SC_DB)
-        # Auto-attach op DB whenever SQL references op. tables
-        if re.search(r'\bop\.', sql, re.I):
-            try:
-                conn.execute(f"ATTACH DATABASE '{OP_DB}' AS op")
-            except Exception:
-                pass  # already attached
+        # Attach the operator DB unconditionally. It used to attach only when the
+        # SQL literally said "op.", so a cross-database query that named a
+        # commercial table WITHOUT the prefix -- FROM customer_value -- failed with
+        # "no such table". SQLite resolves an unqualified name against every
+        # attached database, so attaching always makes both spellings work, and
+        # attaching a local file costs nothing.
+        try:
+            conn.execute(f"ATTACH DATABASE '{OP_DB}' AS op")
+        except Exception:
+            pass  # already attached
         statements = [s.strip() for s in sql.split(";") if s.strip()]
         rows, note = [], None
         for stmt in statements:
@@ -388,6 +405,12 @@ def query_op(sql: str) -> list:
     sql_clean = sql.split(";")[0].strip()
     try:
         conn = sqlite3.connect(OP_DB)
+        # Mirror of query_sc: attach the network DB so a query routed here can
+        # still name a network table, qualified or not.
+        try:
+            conn.execute(f"ATTACH DATABASE '{SC_DB}' AS sc")
+        except Exception:
+            pass
         rows, note = _exec_with_fix(conn, sql_clean)
         conn.close()
         if note:
@@ -765,9 +788,22 @@ TABLE customer_value
   month            TEXT  — format 'YYYY-MM', 6 months of history per subscriber
   arpu             REAL  — monthly spend in Yuan (5-130 Yuan typical range)
   value_segment    TEXT  — 'bronze'(<15 Yuan),'silver'(15-35),'gold'(35-75),'platinum'(>=75)
-  is_hvc           INT   — 1 = High Value Customer (gold or platinum)
-  churn_risk_score REAL  — ML churn probability 0.0-1.0 (XGBoost, AUC 0.885)
-  churn_label      TEXT  — 'low'(<p70),'medium'(p70-p90),'high'(>p90) — top 10% = high risk
+  is_hvc           INT   — 1 = High Value Customer. This is value_segment='platinum'
+                           ONLY: the top decile of the live ARPU distribution. It is NOT
+                           gold+platinum, and it has nothing to do with churn scoring.
+                           Gold customers have is_hvc=0. To count HVCs use is_hvc=1.
+  churn_risk_score REAL  — churn RISK INDICATOR 0.0-1.0 from an explainable scorecard:
+                           ARPU decline .35, unpaid bills .20, data decline .15, voice decline .10,
+                           low engagement .10, short tenure .10, plus a live service-experience
+                           penalty (open incidents / unresolved complaints) capped at .40.
+                           It is NOT an ML model output and NOT a validated probability. The
+                           XGBoost model was withdrawn after its features were measured not to
+                           transfer to this environment. Describe it as a ranking of observable
+                           risk factors — never quote a prediction accuracy or AUC for it.
+  churn_label      TEXT  — 'low'/'medium'/'high'. Percentile bands of the LIVE score
+                           distribution (high = top decile), not fixed thresholds. To find
+                           high-risk subscribers use churn_label='high' — that is already
+                           defined by the data, so never ask the user for a cutoff.
 
 !! CRITICAL: customer_value has ONE ROW PER SUBSCRIBER PER MONTH (6 rows per subscriber).
    ALWAYS filter to one month or AVG/SUM will be inflated 6x.
@@ -887,18 +923,6 @@ CRITICAL — REGION NAME CASE: Region values in the database are Title Case.
              FumaBu Town, Sandlocke City, Gaipan Village, Northern Air Temple, Western Air Temple,
              Eastern Air Temple, Southern Air Temple, Kyoshi Island, Crescent Island
 
-=== VERIFIED GROUND-TRUTH COUNTS (use these to validate PROPOSE numbers) ===
-Total subscribers: 50000
-5G upsell candidates (5G device + 4G plan + 5G coverage): 3852
-3G sunset at-risk total: 14612
-  - No VoLTE device (needs hardware upgrade): 9046
-  - VoLTE capable but inactive on 3G: 5566
-FWA candidates (stationary + >30GB/month): 916
-HVC customers (gold + platinum): 7979
-5G capable but not on 5G plan: 16514
-Device breakdown:
-  Not 5G capable (is_5g_capable=0): 30352 — on 3G: 12314, on 4G: 18038
-  5G capable (is_5g_capable=1): 19648 — on 3G: 2299, on 4G: 14215, on 5G: 3134
 """
 
 FULL_SCHEMA = NetworkAnalyzer_SCHEMA + OPERATOR_SCHEMA + CROSS_DB_NOTE  # DATA_PROFILE appended after it's built
@@ -1032,7 +1056,7 @@ offer_assignments: msisdn, offer_id, assigned_date, channel, accepted
 campaigns: campaign_id, campaign_name, campaign_type, target_count, status, offer_id
 campaign_targets: campaign_id, msisdn, reason, score, notified, converted
 billing: msisdn, billing_month, total_amount, data_charges, voice_charges, payment_status — NO region column, JOIN subscribers for region
-customer_value: msisdn, month(YYYY-MM), arpu(Yuan), value_segment('bronze'/'silver'/'gold'/'platinum'), is_hvc — 6 ROWS PER SUBSCRIBER, always filter: cv.month=(SELECT MAX(month) FROM op.customer_value)
+customer_value: msisdn, month(YYYY-MM), arpu(Yuan), value_segment('bronze'/'silver'/'gold'/'platinum'), is_hvc(1 only for platinum, the top decile) — 6 ROWS PER SUBSCRIBER, always filter: cv.month=(SELECT MAX(month) FROM op.customer_value)
 
 === CRITICAL RULES ===
 - region values are Title Case: 'Ba Sing Se' not 'ba sing se', 'Omashu' not 'omashu'
@@ -1075,6 +1099,7 @@ def _build_data_profile() -> str:
     Result is injected into every prompt so the model never has to guess."""
 
     MAX_CATS = 30   # max distinct values to list for categorical columns
+    _MAX_CAT_CHARS = 600  # and a hard cap on the rendered length of that list
     lines = ["=== DATA FACTS (auto-queried from live DB at startup — trust these over assumptions) ==="]
 
     # Tables with millions of rows — sample instead of full scan.
@@ -1157,13 +1182,29 @@ def _build_data_profile() -> str:
                 ).fetchone()[0]
                 if n_distinct == 0:
                     continue
+                # The enumeration gate counts distinct values and never looked at
+                # their SIZE. agent_actions.payload holds one JSON blob per queued
+                # proposal, msisdn arrays included -- a handful of distinct values,
+                # so it qualified as categorical and was dumped verbatim: a single
+                # 225,000-character line that pushed the whole prompt past the
+                # model's 32k context. Listing values is for short labels; anything
+                # long is described, not reproduced.
+                _enumerated = False
                 if n_distinct <= MAX_CATS:
                     vals = conn.execute(
                         f"SELECT DISTINCT {cname} FROM {sample} WHERE {cname} IS NOT NULL ORDER BY {cname} LIMIT {MAX_CATS}"
                     ).fetchall()
                     val_str = ", ".join(f"'{r[0]}'" for r in vals if r[0] is not None)
-                    tlines.append(f"  {cname}: [{val_str}]")
-                else:
+                    if len(val_str) <= _MAX_CAT_CHARS:
+                        tlines.append(f"  {cname}: [{val_str}]")
+                        _enumerated = True
+                    else:
+                        tlines.append(
+                            f"  {cname}: {n_distinct} distinct values, too long to list "
+                            f"(longest {max(len(str(r[0])) for r in vals):,} chars) — "
+                            f"query the column if you need its contents")
+                        _enumerated = True
+                if not _enumerated:
                     row = conn.execute(
                         f"SELECT MIN({cname}), MAX({cname}) FROM {sample} WHERE {cname} IS NOT NULL"
                     ).fetchone()
@@ -1232,6 +1273,38 @@ def _build_data_profile() -> str:
                 f"NEVER use thresholds below {r[0]} — returns 0 rows."
             )
 
+        # ── Which regions belong to which nation ────────────────────────
+        # The per-column profile lists region values and nation values as two
+        # separate flat lists, so the mapping between them was never stated.
+        # Nothing in the string "Agna Qel'a" says Water Tribe, while "Northern
+        # Air Temple" at least starts with "Northern" -- so a question about the
+        # northern water tribe was answered by querying an Air Nomad region.
+        # The grouping is in the data; printing it removes the reason to guess.
+        try:
+            geo = {}
+            for _reg, _nat, _n in sc.execute(
+                "SELECT region, nation, COUNT(*) FROM subscribers WHERE is_active=1 "
+                "GROUP BY region, nation ORDER BY nation, COUNT(*) DESC"
+            ).fetchall():
+                geo.setdefault(_nat or "(unknown)", []).append((_reg, _n))
+            if geo:
+                lines.append("\n=== REGIONS BY NATION (filter on nation for a whole "
+                             "nation; never guess which regions belong to it) ===")
+                for _nat, _regs in geo.items():
+                    lines.append(f"  {_nat}: " + ", ".join(
+                        f"{_r} ({_c:,})" for _r, _c in _regs))
+                _dupes = {}
+                for _nat, _regs in geo.items():
+                    for _r, _ in _regs:
+                        _dupes.setdefault(_r, []).append(_nat)
+                for _r, _nats in _dupes.items():
+                    if len(_nats) > 1:
+                        lines.append(f"  !! '{_r}' appears under more than one nation "
+                                     f"({', '.join(_nats)}) — filter on nation AND region "
+                                     f"together, never on region alone.")
+        except Exception as _e:
+            print(f"[DataProfile] region/nation map unavailable: {_e}")
+
         sc.close()
     except Exception as e:
         lines.append(f"(data profile error: {e})")
@@ -1245,21 +1318,28 @@ def _build_data_profile() -> str:
     # quotes a stale TND currency.
     try:
         _oc = sqlite3.connect(f"file:{OP_DB}?mode=ro", uri=True)
+        # offer_id is listed because the action schema asks for one. Without it the
+        # model could see the right offer by name and still had to invent its id,
+        # so a correctly-chosen offer arrived at the Ops Portal under someone
+        # else's number -- with that other offer's campaign type.
         _offers = _oc.execute(
-            "SELECT offer_name, target_campaign, target_technology, discount_pct, "
+            "SELECT offer_id, offer_name, target_campaign, target_technology, discount_pct, "
             "bonus_data_gb, validity_days FROM offers WHERE is_active=1 ORDER BY offer_id"
         ).fetchall()
         _oc.close()
         if _offers:
             lines.append("\n=== OFFER CATALOG (op.offers — the ONLY valid offer terms) ===")
             lines.append("When recommending an offer, use one of these names AND its real "
-                         "terms. Never invent a discount, bonus, or benefit not listed here.")
-            for _nm, _camp, _tech, _disc, _bonus, _days in _offers:
+                         "terms. Never invent a discount, bonus, or benefit not listed here. "
+                         "When an action needs an offer_id, copy the id shown here — never "
+                         "guess it. The bracket shows [campaign_type/technology]: an offer may "
+                         "only be used in a campaign of its own campaign_type.")
+            for _oid, _nm, _camp, _tech, _disc, _bonus, _days in _offers:
                 _bits = []
                 if _disc:  _bits.append(f"{_disc:g}% discount")
                 if _bonus: _bits.append(f"{_bonus:g} GB bonus data")
                 if _days:  _bits.append(f"valid {_days:g} days")
-                lines.append(f"  {_nm} [{_camp or 'general'}/{_tech or 'any'}]: "
+                lines.append(f"  offer_id={_oid} {_nm} [{_camp or 'general'}/{_tech or 'any'}]: "
                              + (", ".join(_bits) if _bits else "no discount or bonus"))
     except Exception as _e:
         print(f"[DataProfile] offer catalog unavailable: {_e}")
@@ -1319,6 +1399,89 @@ DATA_PROFILE = _load_data_profile_cached()
 # Append real data facts to both schema strings so every prompt has them
 FULL_SCHEMA    = FULL_SCHEMA    + "\n\n" + DATA_PROFILE
 COMPACT_SCHEMA = COMPACT_SCHEMA + "\n\n" + DATA_PROFILE
+
+
+def _build_ground_truth() -> str:
+    """Recompute the headline counts from the live databases.
+
+    These were hardcoded constants inside CROSS_DB_NOTE, which was safe only
+    while the data sat still. db_simulator.py rewrites both databases every
+    30 seconds, and the block had drifted far enough to be actively wrong: it
+    still defined HVC as "gold + platinum" (7979) long after the switch to a
+    platinum-only top decile (5255 when this was written). Since the PROPOSE
+    rule tells the model to validate its numbers against this block, a stale
+    block is worse than no block at all.
+
+    Deliberately NOT stored in the DATA_PROFILE disk cache: that cache is keyed
+    on the schema fingerprint, which does not change when the counts do.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{SC_DB}?mode=ro", uri=True)
+        conn.execute(f"ATTACH DATABASE 'file:{OP_DB}?mode=ro' AS op")
+
+        def one(sql):
+            row = conn.execute(sql).fetchone()
+            return row[0] if row and row[0] is not None else 0
+
+        total = one("SELECT COUNT(*) FROM subscribers WHERE is_active=1")
+        hvc = one("SELECT COUNT(DISTINCT msisdn) FROM op.customer_value "
+                  "WHERE is_hvc=1 AND month=(SELECT MAX(month) FROM op.customer_value)")
+        upsell_5g = one("""
+            SELECT COUNT(DISTINCT s.msisdn) FROM subscribers s
+            JOIN devices d ON s.msisdn=d.msisdn
+            JOIN subscriber_technology st ON s.msisdn=st.msisdn
+            WHERE s.is_active=1 AND d.is_5g_capable=1 AND st.current_technology!='5G'
+              AND EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn
+                         AND cv.technology_available='5G')""")
+        cap_not_on = one("""
+            SELECT COUNT(DISTINCT s.msisdn) FROM subscribers s
+            JOIN devices d ON s.msisdn=d.msisdn
+            JOIN subscriber_technology st ON s.msisdn=st.msisdn
+            WHERE s.is_active=1 AND d.is_5g_capable=1 AND st.current_technology!='5G'""")
+        no_volte = one("""
+            SELECT COUNT(DISTINCT s.msisdn) FROM subscribers s
+            JOIN devices d ON s.msisdn=d.msisdn
+            JOIN subscriber_technology st ON s.msisdn=st.msisdn
+            WHERE s.is_active=1 AND st.current_technology='3G' AND d.volte_capable=0""")
+        volte_idle = one("""
+            SELECT COUNT(DISTINCT s.msisdn) FROM subscribers s
+            JOIN devices d ON s.msisdn=d.msisdn
+            JOIN subscriber_technology st ON s.msisdn=st.msisdn
+            WHERE s.is_active=1 AND st.current_technology='3G' AND d.volte_capable=1
+              AND (st.volte_active=0 OR st.volte_active IS NULL)""")
+        fwa = one("""
+            SELECT COUNT(DISTINCT msisdn) FROM mobility_profile
+            WHERE is_fwa_candidate=1
+              AND month=(SELECT MAX(month) FROM mobility_profile)""")
+        conn.close()
+
+        lines = [
+            "",
+            "=== VERIFIED GROUND-TRUTH COUNTS (computed live at startup) ===",
+            f"Active subscribers: {total}",
+            f"HVC customers (is_hvc=1, latest month): {hvc}",
+            f"5G upsell candidates (5G device + not on 5G + 5G coverage): {upsell_5g}",
+            f"5G capable but not on 5G: {cap_not_on}",
+            f"3G sunset at-risk total: {no_volte + volte_idle}",
+            f"  - No VoLTE device (needs hardware upgrade): {no_volte}",
+            f"  - VoLTE capable but inactive on 3G: {volte_idle}",
+            f"FWA candidates (stationary + >30GB/month): {fwa}",
+            "These are live counts, read at server start. If a query you ran",
+            "disagrees, trust your query and say so -- the simulator moves these",
+            "numbers continuously. Never quote a number from this block as the",
+            "answer to a question; run the query.",
+            "",
+        ]
+        print(f"[GroundTruth] {total} subs, {hvc} HVC, {upsell_5g} 5G-upsell, {fwa} FWA")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[GroundTruth] skipped: {e}")
+        return ""
+
+
+GROUND_TRUTH = _build_ground_truth()
+FULL_SCHEMA = FULL_SCHEMA + GROUND_TRUTH
+COMPACT_SCHEMA = COMPACT_SCHEMA + GROUND_TRUTH
 
 # ── Bedrock-specific schema additions ───────────────────────────────────
 BEDROCK_CRITICAL_RULES = """
@@ -1484,6 +1647,55 @@ def _check_sql(sql: str, db_path: str) -> str | None:
         return "\n".join(lines)
 
 
+
+# Tables holding more than one row per subscriber. Joining any of them and then
+# counting with COUNT(*) counts rows, not people. Asked for HVC 5G-upsell
+# candidates by region the agent joined coverage (one row per subscriber per
+# covering cell) and counted rows: 2,689 against a true 800, a 3.4x overcount
+# that reached both the answer and the strategy diagram. The system prompt
+# already carries the COUNT(DISTINCT) rule; this is the same rule enforced.
+_FANOUT_TABLES = (
+    "coverage", "customer_value", "billing", "dou_monthly", "ott_monthly",
+    "mobility_profile", "qoe_daily", "subscriptions", "experience_incidents",
+    "complaints", "kpis_daily", "kpis_hourly", "offer_assignments",
+    "campaign_targets", "sms_log", "roaming_usage", "signal_quality",
+    "nps_scores", "network_alarms",
+)
+
+
+def _fanout_count_error(sql: str) -> str:
+    """Reject COUNT(*) when the FROM/JOIN chain can repeat a subscriber.
+
+    Returns an explanation for the model, or '' when the query is fine. Purely
+    structural -- it reads the SQL, not the question, so it applies to any
+    query of this shape rather than to phrasings someone anticipated.
+    """
+    low = sql.lower()
+    if "count(*)" not in low.replace(" ", ""):
+        return ""
+    # COUNT(DISTINCT ...) anywhere means the author already handled it.
+    if "count(distinct" in low.replace(" ", ""):
+        return ""
+    # Only meaningful when more than one table is involved.
+    joined = re.findall(r"(?:from|join)\s+(?:op\.)?([a-z_][a-z0-9_]*)", low)
+    if len(joined) < 2:
+        return ""
+    hits = sorted({t for t in joined if t in _FANOUT_TABLES})
+    if not hits:
+        return ""
+    # A per-subscriber grain is what makes the fan-out wrong; if the query is
+    # aggregating something else entirely (no msisdn anywhere) leave it alone.
+    if "msisdn" not in low:
+        return ""
+    return (f"COUNT(*) over a join that includes {', '.join(hits)} counts ROWS, not "
+            f"subscribers -- those tables hold multiple rows per msisdn (coverage is one "
+            f"row per subscriber per covering cell; the monthly tables one per month), so "
+            f"this overcounts, often several times over. Use COUNT(DISTINCT s.msisdn). "
+            f"If the table is only there to test membership, prefer "
+            f"EXISTS(SELECT 1 FROM <table> x WHERE x.msisdn=s.msisdn AND ...) over a JOIN, "
+            f"and give it an alias no other table in the query is using.")
+
+
 def _check_sql_semantics(sql: str) -> str | None:
     """Check for semantic mistakes that EXPLAIN won't catch:
     - customer_value joined without a month filter (causes 6x row inflation)
@@ -1492,6 +1704,11 @@ def _check_sql_semantics(sql: str) -> str | None:
     Returns None if clean, or a correction message."""
     sql_up = sql.upper()
     issues = []
+
+    # COUNT(*) across a join that repeats a subscriber counts rows, not people.
+    _fan = _fanout_count_error(sql)
+    if _fan:
+        issues.append(_fan)
 
     # customer_value joined without month filter
     if "CUSTOMER_VALUE" in sql_up:
@@ -2058,7 +2275,7 @@ Rules:
 - NEVER output QUERY_SC or QUERY_OP tags inside a CONCLUDE or PROPOSE block.
 - NEVER use PROPOSE for analysis questions — use CONCLUDE for those.
 - Use correct campaign types: 5G_upsell, 3G_migration, FWA, VoLTE_sunset, HVC_upsell.
-- In JSON output, never use commas in numbers. Write 13532 not 13,532.
+- In JSON output, never use commas in numbers. Write digits only, e.g. 1234567 not 1,234,567.
 - Before writing the "text" field, verify all arithmetic: if your query returns grouped counts, the "remaining" group is total minus the sum of all other groups. Never reuse the total as a subgroup count.
 - RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
 - ONLY CLAIM WHAT YOU QUERIED: every statement in your answer must be supported by a row your executed queries actually returned. This applies HARDEST to negative and causal claims — "there are no active alarms", "this is not caused by X", "it isn't a radio-side problem", "nothing else is affected". You can only rule something OUT if you ran a query that looked for it and got zero rows. If you did not query alarms, say nothing about alarms. If you did not query RSRP/latency/throughput, do not claim the issue is or isn't related to them. When a root_cause column already tells you the cause, REPORT that cause — do not speculate about mechanisms (CDN vs backhaul vs radio) you never measured. If you think an extra check is worth making, run it; otherwise stay silent about it. An answer that states only what the data shows is strictly better than one padded with unverified diagnosis.
@@ -2079,12 +2296,12 @@ The "mindmap" field: a hierarchical interactive mind map. Include for any subscr
   - Keep all labels under 35 characters. Values (counts, percentages) go in the "value" field, not the label.
 
 The "text" field must be SHORT and conversational — 3 to 5 sentences maximum. Lead with the key finding and numbers. ABSOLUTELY NO bullet points, headers, markdown formatting, tables, or code blocks in the text field — ever. This rule applies even when queries fail or return 0 rows. If data is insufficient, say so in plain sentences: "The query returned no results — likely because X. Try rephrasing as Y." Write like a smart analyst talking to a manager. Example: "Ba Sing Se has the most HVCs at risk (238 customers, avg 94 Yuan ARPU). Omashu and Northern Water Tribe follow with 37 and 46 at-risk customers respectively. Total exposure across all three regions is roughly 30k Yuan/month."
-The "recommendations" field: ask yourself — does this data reveal an opportunity, a risk, or an actionable gap? If yes, include 2-3 recommendations. If the question is purely factual with no commercial angle (e.g. "what is the average latency?"), omit the field entirely or set it to [].
+The "recommendations" field: if the finding is a LIVE network fault or open incident, recommendations must be OPERATIONAL — what engineering does, what customer care does for affected subscribers, and how to prevent a repeat. Never answer a fault with a discount, upsell or migration campaign; the service is broken, not obsolete. Otherwise, ask yourself — does this data reveal an opportunity, a risk, or an actionable gap? If yes, include 2-3 recommendations. If the question is purely factual with no commercial angle (e.g. "what is the average latency?"), omit the field entirely or set it to [].
 When recommendations ARE warranted, write like a senior analyst advising a commercial director. Each recommendation must be backed by a number from your query results. NEVER invent percentages, revenue figures, or durations.
 
 BEFORE writing CONCLUDE — if you have only 1 query step so far and the question has a commercial angle, you MUST run 1 enrichment query before concluding. Match it to the context:
 - Top ARPU / platinum subscribers → check what plan they're on (are they already on the highest tier?) or whether they have 5G-capable devices not yet on 5G
-- Low ARPU / bronze subscribers → check churn_risk_score to identify who is actually at risk of leaving
+- Low ARPU / bronze subscribers → check churn_label / churn_risk_score to rank who shows the most risk factors (an indicator, not a prediction)
 - Poor KPI result (low throughput, high drop rate, low availability) → check active alarm count on those cells to see if it's a known fault
 - 3G subscriber count → check how many of them have 4G/5G-capable devices to quantify the migration opportunity
 - 5G upsell candidates → check their avg ARPU to estimate revenue impact of converting them
@@ -2253,6 +2470,261 @@ def _fetch_alarm_context() -> str:
     except Exception as e:
         print(f"[AlarmContext] {e}")
         return ""
+
+
+
+
+# ── Recommendation routing ──────────────────────────────────────────────
+# A live network fault and a commercial opportunity need opposite advice, and
+# the generator used to have only one persona ("senior commercial analyst"), so
+# every finding came out as a sales pitch. A dropped VoLTE bearer was answered
+# with a 20%-off migration offer: the offer was real and correctly grounded in
+# the catalogue, but the customer's service was broken, not obsolete. These two
+# helpers decide which kind of advice the finding actually calls for, and give
+# the incident branch real rows to cite.
+
+_INCIDENT_MARKERS = re.compile(
+    r"\b(incident|incidents|outage|outages|degradation|degraded|fault|faults|"
+    r"bearer|backhaul|congestion|interference|packet loss|throttling|throttled|"
+    r"dns|cdn|power failure|site outage|service issue|service issues|"
+    r"currently affect|right now|actively|unresolved|still open|"
+    r"drop(?:ped)? call|call drops|not working|is down)\b", re.I)
+
+
+def _is_incident_answer(question: str, text: str) -> bool:
+    """True when the finding is a live service fault rather than an opportunity.
+
+    Checked against the ANSWER as well as the question: 'what is going on at
+    site X' names no fault, but the answer that comes back does.
+    """
+    blob = f"{question} {text}"
+    if not _INCIDENT_MARKERS.search(blob):
+        return False
+    # A question about the 3G sunset mentions "migration" and legitimately wants
+    # commercial advice, even though it also trips 'degradation'. Live-fault
+    # language plus an open incident is the real signal.
+    return True
+
+
+def _live_incident_context(limit: int = 12) -> str:
+    """Real open incidents, for the recommendation prompt to cite.
+
+    _fetch_alarm_context() reads network_alarms/network_incidents, which are
+    cell-level equipment events. experience_incidents is the per-customer
+    service log, and it is what any question about who is affected right now is
+    actually answered from -- so it has to be what the advice is grounded in.
+    """
+    try:
+        rows = query_sc(f"""
+            SELECT ei.root_cause, ei.affected_service, ei.severity,
+                   COUNT(*)                                   AS affected,
+                   SUM(ei.is_hvc)                             AS hvc,
+                   COUNT(DISTINCT s.site_name)                AS sites,
+                   GROUP_CONCAT(DISTINCT s.region)            AS regions,
+                   MIN(ei.started_at)                         AS since,
+                   MIN(ei.expected_resolution_at)             AS eta
+            FROM experience_incidents ei
+            LEFT JOIN cells c ON ei.cell_id = c.cell_id
+            LEFT JOIN sites s ON c.site_id = s.site_id
+            WHERE ei.status = 'active'
+            GROUP BY ei.root_cause, ei.affected_service, ei.severity
+            ORDER BY CASE ei.severity WHEN 'critical' THEN 1
+                                      WHEN 'major'    THEN 2 ELSE 3 END,
+                     affected DESC
+            LIMIT {int(limit)}
+        """)
+        if not rows or (isinstance(rows[0], dict) and "error" in rows[0]):
+            return ""
+        lines = []
+        for r in rows:
+            lines.append(
+                f"- [{str(r.get('severity','?')).upper()}] {r.get('root_cause','?')} "
+                f"affecting {r.get('affected_service','?')}: "
+                f"{r.get('affected', 0)} subscribers ({r.get('hvc', 0) or 0} high-value) "
+                f"across {r.get('sites', 0) or 0} site(s) in {r.get('regions') or 'n/a'}; "
+                f"open since {r.get('since','?')}, expected clear {r.get('eta','unknown')}"
+            )
+        return ("LIVE OPEN INCIDENTS (cite only these numbers; do not invent "
+                "durations, counts or SLA figures):\n" + "\n".join(lines))
+    except Exception as e:
+        print(f"[IncidentContext] {e}")
+        return ""
+
+
+def _offer_catalogue_block() -> str:
+    """The real, active offers. A recommendation that names an offer must use
+    one of these, with its actual terms -- the agent previously quoted a 20%
+    discount on an offer the catalogue records at 15%."""
+    try:
+        rows = query_op("""
+            SELECT offer_id, offer_name, target_campaign, discount_pct, bonus_data_gb,
+                   validity_days
+            FROM offers WHERE is_active = 1 ORDER BY target_campaign, offer_name
+        """)
+        if not rows or (isinstance(rows[0], dict) and "error" in rows[0]):
+            return ""
+        lines = [
+            f"- offer_id={r.get('offer_id')} {r.get('offer_name')} "
+            f"[{r.get('target_campaign')}]: "
+            f"{r.get('discount_pct') or 0}% off, "
+            f"{r.get('bonus_data_gb') or 0}GB bonus, "
+            f"{r.get('validity_days') or 0} days"
+            for r in rows
+        ]
+        return ("ACTIVE OFFER CATALOGUE (if you name an offer it MUST be one of "
+                "these, with these exact terms; copy the offer_id, never guess it, "
+                "and only use an offer in a campaign of its own [campaign_type]):\n"
+                + "\n".join(lines))
+    except Exception:
+        return ""
+
+
+# Vague verbs that let a recommendation say nothing while sounding busy. If the
+# model leans on these the recommendation is padding, not advice.
+_REC_WEAK_OPENERS = re.compile(
+    r"^\s*(consider|monitor|explore|look into|evaluate|assess|review|"
+    r"keep an eye|continue to|maintain|leverage|utilise|utilize)\b", re.I)
+
+
+_REC_SYSTEM_INCIDENT = (
+    "You are a telecom service-operations lead writing the action list for a LIVE "
+    "network fault that is currently degrading customer service.\n"
+    "\n"
+    "This is a broken service, not a sales opportunity. Do NOT recommend discounts, "
+    "upsells, migrations, plan changes or marketing campaigns as a remedy for a fault "
+    "-- the customer's service is broken, not obsolete. A retention gesture is allowed "
+    "ONLY as goodwill for customers already harmed, never as the fix.\n"
+    "\n"
+    "Give exactly 3 recommendations, one of each, in this order:\n"
+    "  1. REMEDIATION -- what network engineering does next, specific to the stated "
+    "root cause (e.g. a dropped VoLTE bearer points at IMS/EPC signalling on that "
+    "cell; backhaul degradation points at the transport link).\n"
+    "  2. CUSTOMER PROTECTION -- what care/comms does for the affected subscribers "
+    "now, prioritising the high-value ones by count.\n"
+    "  3. PREVENTION -- the follow-up that stops a repeat, or the check that confirms "
+    "the fault actually cleared.\n"
+    "\n"
+    "Every recommendation must name the real site/cell/region and the real affected "
+    "and high-value counts from the data. Never invent SLA targets, restoration "
+    "times, credit amounts or percentages. Start each with a concrete verb "
+    "(Dispatch, Escalate, Verify, Notify, Credit, Re-test, Raise) -- never with "
+    "Consider, Monitor, Explore, Review or Evaluate.\n"
+    "\n"
+    "Output a JSON array of exactly 3 strings and nothing else."
+)
+
+_REC_SYSTEM_COMMERCIAL = (
+    "You are a senior telecom commercial analyst advising a commercial director.\n"
+    "\n"
+    "Give exactly 3 recommendations. Each one must state:\n"
+    "  - the specific action to take,\n"
+    "  - the segment and its size, using a real count from the analysis,\n"
+    "  - what it is expected to achieve.\n"
+    "\n"
+    "Rules:\n"
+    "- Use ONLY numbers that appear in the analysis or the grounded data below. "
+    "Never invent percentages, revenue figures, conversion rates or deadlines.\n"
+    "- If you name an offer, it must come from the catalogue below with its exact terms.\n"
+    "- Start each recommendation with a concrete verb (Target, Launch, Migrate, "
+    "Prioritise, Convert, Bundle) -- never with Consider, Monitor, Explore, Review, "
+    "Evaluate or Leverage.\n"
+    "- Rank them: highest value or most urgent first.\n"
+    "- If the data genuinely supports fewer than 3 real actions, repeat nothing and "
+    "return only the ones that are justified.\n"
+    "\n"
+    "Output a JSON array of strings and nothing else."
+)
+
+
+def _generate_recommendations(question: str, text: str, is_incident: bool) -> list:
+    """Write recommendations from scratch, grounded in the right context."""
+    if is_incident:
+        system = _REC_SYSTEM_INCIDENT
+        grounding = "\n\n".join(b for b in (
+            _live_incident_context(),
+            _fetch_alarm_context() if _is_alarm_question(question) else "") if b)
+    else:
+        system = _REC_SYSTEM_COMMERCIAL
+        grounding = "\n\n".join(b for b in (
+            _offer_catalogue_block(),
+            _fetch_alarm_context() if _is_alarm_question(question) else "") if b)
+    today = datetime.now().date().isoformat()
+    raw = _llm(
+        system + f"\nToday's date: {today}. Only reference dates that appear in the "
+                 f"analysis or grounded data.",
+        f"Question: {question}\n\nAnalysis: {text}" + (f"\n\n{grounding}" if grounding else ""),
+        max_tokens=900, think_budget=5000, allow_thinking=True)
+    try:
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not m:
+            return []
+        arr = json.loads(m.group())
+        return [r if isinstance(r, str) else
+                (r.get("text") or r.get("recommendation") or r.get("action") or str(r))
+                for r in arr]
+    except Exception:
+        return []
+
+
+def _refine_recommendations(recs, question: str, text: str) -> list:
+    """Hold model-written recommendations to the same bar as generated ones.
+
+    The tools path took whatever the conclude call put in the recommendations
+    field and passed it straight through, so a live fault came back with
+    "Monitor the resolution timeline" and "No immediate action is needed" --
+    three sentences that commit to nothing. Anything opening with a hedge verb
+    is dropped, and if that leaves too little the list is rewritten against the
+    incident or commercial brief.
+    """
+    is_incident = _is_incident_answer(question, text or "")
+    clean = [r for r in (recs or [])
+             if isinstance(r, str) and r.strip() and not _REC_WEAK_OPENERS.match(r)]
+    if len(clean) >= 2:
+        return clean
+    regenerated = _generate_recommendations(question, text or "", is_incident)
+    strong = [r for r in regenerated
+              if isinstance(r, str) and r.strip() and not _REC_WEAK_OPENERS.match(r)]
+    if strong:
+        print(f"[Recs] rewrote {len(recs or [])} weak -> {len(strong)} "
+              f"({'incident' if is_incident else 'commercial'} brief)")
+        return strong
+    return clean or [r for r in (recs or []) if isinstance(r, str)]
+
+
+
+def _clean_fallback_text(text: str) -> str:
+    """Sanitise the last-resort summary before it reaches the user.
+
+    Every other path strips leaked action tags and raw JSON; this one returned
+    whatever the model produced, so when the chain failed and the model replied
+    with a bare "QUERY_SC: SELECT ..." that query was displayed to the user as
+    the answer. Strip any tag, and if what remains is just SQL, say so plainly
+    instead of showing the query.
+    """
+    t = (text or "").strip()
+    for tag in ("QUERY_BOTH:", "QUERY_SC:", "QUERY_OP:", "CONCLUDE:",
+                "PROPOSE:", "SCHEMA:", "NETWORK:", "OPERATOR:"):
+        i = t.upper().find(tag)
+        if i != -1:
+            t = (t[:i] + t[i + len(tag):]).strip()
+    # The model sometimes narrates the guardrails themselves -- 'multiple CONCLUDE
+    # steps were rejected because...' with recommendations for fixing the system
+    # prompt. That is internal machinery, never an answer to the user's question.
+    _meta = ('conclude step', 'conclude was', 'conclude rejected', 'system prompt',
+             'the query is correct and the result is valid', 'columns you queried',
+             'improve system prompting', 'fix conclusion logic')
+    tl = t.lower()
+    if sum(1 for k in _meta if k in tl) >= 2:
+        return ("I could not produce a clean answer for that one. Please ask it again, "
+                "or narrow it to a single metric.")
+    up = t.upper()
+    looks_like_sql = up.startswith(("SELECT", "WITH ", "ATTACH")) or (
+        " FROM " in up and up.count("SELECT") >= 1 and t.count(".") <= 2)
+    if not t or looks_like_sql:
+        return ("I could not complete this one. The queries I tried did not return "
+                "usable data, so there is nothing reliable to report here. Try "
+                "narrowing the question or asking for one metric at a time.")
+    return t
 
 
 def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _resume_steps: list = None) -> dict:
@@ -2558,10 +3030,19 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                 "complaint": ["complaint"],
             }
             _conclusion_lower = conclusion.lower()
+            # A count query aliases its result ('SELECT COUNT(*) as n FROM complaints'),
+            # so the returned column is 'n' and the metric name never appears in
+            # _all_columns. Checking columns alone therefore rejected EVERY answer
+            # about complaints, churn or NPS however correctly it was queried -- the
+            # model then narrated the rejection itself into the answer. The executed
+            # SQL is the honest evidence that the metric was actually looked at.
+            _ctx_lower = context.lower()
             _hallucinated = []
             for _label, _col_hints in _hallucination_suspects.items():
                 if _label in _conclusion_lower:
-                    if not any(h in _all_columns for h in _col_hints):
+                    _in_cols = any(h in _all_columns for h in _col_hints)
+                    _in_sql = any(h in _ctx_lower for h in _col_hints)
+                    if not _in_cols and not _in_sql:
                         _hallucinated.append(_label)
             if _hallucinated:
                 context += (
@@ -2718,7 +3199,12 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
 
             # Grounding guard — regenerate from the real query rows (in `context`) if
             # the answer cites numbers that aren't in the data (text-chain path).
-            text_only = _ground_text(text_only, context, question)
+            # steps_log carries the '[sql 0]' markers that are the ONLY evidence a
+            # negative claim is earned. The tools path passed it; this one did not,
+            # so on the text chain every negative-sounding phrase was treated as
+            # unearned and triggered a needless regeneration, while a genuinely
+            # earned one got no credit. Same check, same evidence, both paths.
+            text_only = _ground_text(text_only, context, question, steps_log)
 
             # For treemap questions, ALWAYS build chart from query results — never rely on model JSON
             if is_treemap and context:
@@ -2739,17 +3225,29 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                 "inactive", "at-risk", "opportunity", "potential", "below", "gap"
             ]
             _has_actionable = any(s in (text_only + question).lower() for s in _actionable_signals)
-            if not _recs and text_only and _has_actionable:
-                _grounding = _fetch_alarm_context() if _is_alarm_question(question) else ""
+            # An open fault is always worth acting on, even when the wording
+            # trips none of the commercial signal words above.
+            _is_incident = _is_incident_answer(question, text_only)
+            if not _recs and text_only and (_has_actionable or _is_incident):
+                if _is_incident:
+                    _rec_system = _REC_SYSTEM_INCIDENT
+                    _grounding = "\n\n".join(
+                        b for b in (_live_incident_context(),
+                                    _fetch_alarm_context() if _is_alarm_question(question) else "")
+                        if b)
+                else:
+                    _rec_system = _REC_SYSTEM_COMMERCIAL
+                    _grounding = "\n\n".join(
+                        b for b in (_offer_catalogue_block(),
+                                    _fetch_alarm_context() if _is_alarm_question(question) else "")
+                        if b)
                 _grounding_block = f"\n\n{_grounding}" if _grounding else ""
+                _today = __import__('datetime').date.today().isoformat()
                 rec_raw = _llm(
-                    "You are a senior telecom commercial analyst. Based on the analysis below, give exactly 3 recommendations. "
-                    "Each recommendation must explain what to do, why the data justifies it, and the expected business impact. "
-                    "IMPORTANT: Use ONLY numbers that appear in the analysis or grounded data — never invent percentages, dollar amounts, or durations. "
-                    f"Today's date: {__import__('datetime').date.today().isoformat()}. Only reference dates from the analysis — never invent deadlines. "
-                    "Output a JSON array of exactly 3 strings, no other text. Example format (do not copy this): [\"Prioritize X because Y\", \"Launch Z targeting W\", \"Investigate A which shows B\"]",
+                    _rec_system + f"\nToday's date: {_today}. Only reference dates that "
+                                  f"appear in the analysis or grounded data.",
                     f"Question: {question}\n\nAnalysis: {text_only}{_grounding_block}",
-                    max_tokens=800,
+                    max_tokens=900,
                     think_budget=5000,
                     allow_thinking=True
                 )
@@ -2758,6 +3256,11 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                     if arr_match:
                         raw_recs = json.loads(arr_match.group())
                         _recs = [r if isinstance(r, str) else (r.get("text") or r.get("recommendation") or r.get("action") or str(r)) for r in raw_recs]
+                        # Drop anything that opens with a hedge verb -- those are
+                        # padding, and one weak item makes the whole list look weak.
+                        _kept = [r for r in _recs if isinstance(r, str) and not _REC_WEAK_OPENERS.match(r)]
+                        if _kept:
+                            _recs = _kept
                 except Exception:
                     pass
 
@@ -2907,12 +3410,23 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
                                     snippet = json.dumps(results, indent=2)
                                 else:
                                     compact = ", ".join(str(dict(r)) for r in results[:_row_cap])
-                                    snippet = f"[{compact}] (showing {_row_cap} of {n} rows)"
+                                    snippet = (f"TRUNCATED SAMPLE — {n} rows matched, showing only "
+                                               f"the first {_row_cap} in the query's sort order. "
+                                               f"Do not total this slice and do not treat "
+                                               f"categories missing from it as absent; re-query "
+                                               f"with aggregates for totals. Sample: [{compact}]")
                             context += (
                                 f"\nStep {step+1} [{tag.rstrip(':')}]:\n"
                                 f"SQL: {sql[:120]}\n"
                                 f"Results ({n} rows): {snippet}\n"
                             )
+                            # The negative-claim check treats a zero-row query as the
+                            # evidence that the agent actually LOOKED for something and
+                            # found nothing. Only the tools path recorded that marker, so
+                            # on this path a legitimately earned "no other regions are
+                            # affected" could never be recognised as earned. Same marker,
+                            # same meaning, both paths.
+                            steps_log.append(f"[sql {n}] {sql[:90]}")
                             # ── Uniformity check — flag 100% same-bucket CASE WHEN results ──
                             # Skip columns that are filter values (intentionally uniform due to WHERE clause)
                             _where_vals = set(re.findall(r"='([^']+)'", sql) + re.findall(r'=(\d+)', sql))
@@ -3022,6 +3536,7 @@ def _run_chain(question: str, max_steps: int = 8, _resume_context: str = None, _
             "You are a telecom analyst. Summarize findings and recommend actions.",
             f"Question: {question}\n\nData gathered:\n{context}\n\nAnalysis:"
         )
+        summary = _clean_fallback_text(summary)
         chart_spec = _build_treemap_from_context(context) if is_treemap else None
         if chart_spec is None:
             chart_spec = _to_chart_spec(f"{summary}\n\nRaw data:\n{context[-1500:]}", question)
@@ -3148,6 +3663,15 @@ def _fast_query(question: str) -> dict:
         rag_block = rag_context
     else:
         rag_block = ""
+    # The fast path writes SQL but only ever retrieved the KNOWLEDGE base, never
+    # the worked SQL examples -- so the exemplars that disambiguate near-identical
+    # questions (FWA users vs FWA candidates, which differ by ~50x) reached the
+    # reasoning chain and never the single-shot path. Same retrieval, same value.
+    _sql_ex = retrieve_sql(question, top_k=2)
+    if _sql_ex:
+        _hdr = (chr(10) + chr(10) + 'WORKED SQL EXAMPLES - copy the one whose '
+                'question means the SAME thing as the user question:' + chr(10))
+        rag_block = rag_block + _hdr + _sql_ex
     
     sql_system = f"""You are a telecom SQL analyst.
 {rag_block}
@@ -3173,6 +3697,19 @@ SELECT COUNT(*) as n FROM subscribers s JOIN subscriber_technology st ON s.msisd
 
     sql_raw = _llm(sql_system, f"Question: {question}\nSQL:", max_tokens=200)
     sql = sql_raw.strip().strip("```sql").strip("```").strip()
+    # The retrieved SQL exemplars are written as 'QUERY_SC: SELECT ...', so the
+    # model copies that prefix here even though the fast path asks for bare SQL.
+    # Unstripped it never executes, and the tagged string surfaced to the user
+    # as the answer. Strip any leading action tag before anything else sees it.
+    # Slice from the first real SQL keyword. The retrieved exemplars are written
+    # as 'QUERY_SC: SELECT ...' so the model copies that prefix, and it sometimes
+    # adds prose before it too. Anything left in front never executes, and the
+    # unrunnable string was surfacing to the user as the answer.
+    _up = sql.upper()
+    if not _up.startswith(('SELECT', 'WITH', 'ATTACH')):
+        _starts = [q for q in (_up.find('SELECT'), _up.find('WITH '), _up.find('ATTACH')) if q > 0]
+        if _starts:
+            sql = sql[min(_starts):].strip()
 
     # FIX 4: ATTACH queries must always go to query_sc(), check this FIRST
     _fast_tag = "QUERY_SC"
@@ -3188,6 +3725,23 @@ SELECT COUNT(*) as n FROM subscribers s JOIN subscriber_technology st ON s.msisd
         if _db_vote == "op":
             use_op = True
         elif _db_vote == "sc":
+            use_op = False
+        # Deterministic table routing beats both the keyword list and the semantic
+        # vote. The model often writes a bare 'customer_value' with no op. prefix,
+        # and the keyword heuristic reads the QUESTION rather than the SQL -- so
+        # 'how many subscribers are in the high churn risk band' scored as network
+        # and sent an operator table to the network DB, which cannot resolve it.
+        _OP_ONLY = ("customer_value", "customers", "subscriptions", "plans", "billing",
+                    "offers", "campaigns", "campaign_targets", "sms_log", "offer_assignments")
+        _SC_ONLY = ("subscribers", "devices", "subscriber_technology", "sites", "cells",
+                    "kpis_daily", "coverage", "network_alarms", "mobility_profile",
+                    "dou_monthly", "qoe_daily", "experience_incidents")
+        _sl = sql.lower()
+        _hits_op = any(t in _sl for t in _OP_ONLY)
+        _hits_sc = any(t in _sl for t in _SC_ONLY)
+        if _hits_op and not _hits_sc:
+            use_op = True
+        elif _hits_sc and not _hits_op:
             use_op = False
         if use_op:
             results = query_op(sql)
@@ -3307,7 +3861,7 @@ Output ONLY the JSON object. No explanation. No markdown.
 
 Examples:
 {{"action": "assign_offer", "offer_id": 1, "msisdn_filter_sql": "SELECT msisdn FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE s.region='Ba Sing Se' AND st.current_technology='3G'"}}
-{{"action": "create_campaign", "name": "FWA Conversion Ba Sing Se", "type": "FWA", "offer_id": 5, "msisdn_filter_sql": "SELECT mp.msisdn FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)"}}
+{{"action": "create_campaign", "name": "FWA Conversion Ba Sing Se", "type": "FWA", "offer_id": 5, "msisdn_filter_sql": "SELECT mp.msisdn FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile)"}}
 """
     action_raw = _llm(
         ACT_SYSTEM,
@@ -3331,6 +3885,109 @@ Examples:
             return {"type": "error", "text": f"No valid action JSON found: {action_raw[:200]}"}
 
     return _dispatch_action_json(action_json, original_question)
+
+
+
+_MSISDN_TABLES = ("mobility_profile", "subscribers", "subscriber_technology", "dou_monthly",
+                  "ott_monthly", "customer_value", "subscriptions", "billing", "devices",
+                  "complaints", "experience_incidents", "qoe_daily", "campaign_targets")
+
+
+def _as_msisdn_filter(sql: str, runner) -> str:
+    """Turn an audience query that counts into one that lists.
+
+    Sizing an audience and selecting it are the same FROM/WHERE with a different
+    projection, so the model reliably works out who to target and then hands over
+    the COUNT it used to size them. Rather than refuse a correct audience over its
+    projection, rewrite the SELECT list and VERIFY the rewrite by running it: a
+    rewrite that does not come back with msisdns is discarded, not trusted.
+
+    Returns the repaired SQL, or "" if no repair could be verified.
+    """
+    if not sql or ";" in sql.strip().rstrip(";"):     # multi-statement: leave alone
+        head = sql.split(";")[0].upper()
+        if "ATTACH" not in head:
+            return ""
+    m = re.search(r"\bSELECT\b(.*?)\bFROM\b", sql, re.I | re.S)
+    if not m:
+        return ""
+    projection = m.group(1)
+    if not re.search(r"\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", projection, re.I):
+        return ""                                     # not an aggregate; don't guess
+    # "Already selects msisdn" must ignore msisdn INSIDE an aggregate --
+    # COUNT(DISTINCT mp.msisdn) counts the audience, it does not list it, and
+    # treating it as a list is what let the count through as a filter.
+    _bare = re.sub(r"\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\((?:[^()]|\([^()]*\))*\)",
+                   " ", projection, flags=re.I)
+    if re.search(r"\bmsisdn\b", _bare, re.I):         # genuinely selects msisdn
+        return ""
+
+    # Candidate qualifiers: every alias bound to a table that actually has msisdn,
+    # plus the unqualified form for a single-table query.
+    aliases = []
+    for tbl, alias in re.findall(
+            r"\b(?:FROM|JOIN)\s+((?:\w+\.)?\w+)(?:\s+AS)?\s+(\w+)?", sql, re.I):
+        base = tbl.split(".")[-1].lower()
+        if base in _MSISDN_TABLES:
+            aliases.append(f"{alias}." if alias and alias.lower() not in (
+                "on", "where", "group", "order", "join", "left", "inner") else "")
+    seen, ordered = set(), []
+    for a in aliases + [""]:
+        if a not in seen:
+            seen.add(a); ordered.append(a)
+
+    for qual in ordered:
+        cand = sql[:m.start(1)] + f" DISTINCT {qual}msisdn " + sql[m.end(1):]
+        try:
+            rows = runner(cand)
+        except Exception:
+            continue
+        if rows and "error" not in rows[0] and any(r.get("msisdn") for r in rows):
+            print(f"[Propose] audience query counted instead of listing — "
+                  f"rewrote projection to {qual}msisdn ({len(rows)} targets)")
+            return cand
+    return ""
+
+
+def _publish_for_review(topic_type: str, title: str, summary: str, payload: dict) -> tuple:
+    """Publish an action to the bus and CONFIRM the Ops Portal actually took it.
+
+    An MQTT publish succeeding does not mean anything received it. With mosquitto
+    up but the portal down, publishes returned success at QoS 0 -- no subscriber,
+    no retained message -- and the agent reported "sent to the Ops Portal" while
+    the proposal vanished. That is exactly the failure this project keeps running
+    into: a step that reports success while doing nothing. So the queued row is
+    read back before the user is told anything happened.
+
+    Returns (ok, detail) where detail is the action id on success, or the message
+    to show the user on failure.
+    """
+    import json as _json
+    import time as _time
+    try:
+        import paho.mqtt.publish as _mqtt
+        _mqtt.single(f"networkanalyzer/actions/{topic_type}",
+                     _json.dumps({"title": title, "summary": summary, "payload": payload}),
+                     hostname="localhost", port=1883)
+    except Exception as e:
+        return False, (f"Could not reach the action bus ({e}). Nothing was sent and nothing "
+                       f"was written -- start the MQTT broker, then try again.")
+
+    for _ in range(12):                      # the portal inserts asynchronously
+        _time.sleep(0.25)
+        try:
+            conn = sqlite3.connect(OP_DB)
+            got = conn.execute(
+                "SELECT id FROM agent_actions WHERE title=? AND status='pending' "
+                "ORDER BY id DESC LIMIT 1", (title,)).fetchone()
+            conn.close()
+            if got:
+                return True, str(got[0])
+        except Exception:
+            pass
+    return False, ("The message was published but the Ops Portal never recorded it, so it is "
+                   "NOT queued for review and nothing was written. The portal is most likely "
+                   "not running -- start it on port 8001 and try again.")
 
 
 def _dispatch_action_json(action: dict, context: str = "") -> dict:
@@ -3401,38 +4058,131 @@ def _dispatch_action_json(action: dict, context: str = "") -> dict:
         offer_id   = action.get("offer_id")
         filter_sql = action.get("msisdn_filter_sql", "")
 
-        ok = write_op(
-            "INSERT INTO campaigns (campaign_name,campaign_type,target_count,launched_date,status,created_by,offer_id) VALUES(?,?,0,?,'active','agent',?)",
-            (name, ctype, now, offer_id)
-        )
-        if not ok:
-            return {"type": "error", "text": "Failed to create campaign."}
-
-        camp        = query_op("SELECT campaign_id FROM campaigns ORDER BY campaign_id DESC LIMIT 1")
-        campaign_id = camp[0]["campaign_id"] if camp else None
-        count       = 0
-
-        if filter_sql and campaign_id:
-            sc_tables = ["subscribers","mobility","devices","coverage","kpis","cells","sites"]
+        # The chat server does not write campaigns. It resolves the audience and
+        # publishes the campaign to the action bus; the Ops Portal records it as
+        # PENDING and only writes real campaign/campaign_targets rows once a human
+        # approves it there. This used to INSERT an active campaign directly,
+        # which put the agent's own confirmation in place of the human review the
+        # architecture is built around.
+        msisdns = []
+        if filter_sql:
+            sc_tables = ["subscribers", "mobility", "devices", "coverage", "kpis", "cells", "sites"]
             use_sc = any(t in filter_sql.lower() for t in sc_tables)
             targets = query_sc(filter_sql) if use_sc else query_op(filter_sql)
-            if targets and "error" not in targets[0]:
-                conn = sqlite3.connect(OP_DB)
-                for row in targets:
-                    msisdn = row.get("msisdn")
-                    if msisdn:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO campaign_targets (campaign_id,msisdn,reason,score,notified,converted) VALUES(?,?,?,0.8,0,0)",
-                            (campaign_id, msisdn, ctype)
-                        )
-                        count += 1
-                conn.execute("UPDATE campaigns SET target_count=? WHERE campaign_id=?", (count, campaign_id))
-                conn.commit()
-                conn.close()
+            if targets and "error" in targets[0]:
+                return {"type": "error",
+                        "text": f"Could not resolve the target audience: {targets[0]['error']}"}
+            msisdns = [str(r["msisdn"]) for r in targets if r.get("msisdn")]
 
+            # An empty result used to fall straight through: both branches above
+            # tested `targets` truthiness, so [] matched neither, msisdns stayed
+            # empty, and the campaign was published to Ops with 0 targets while
+            # the user was told it had been sent successfully. A campaign that
+            # reaches nobody is not a campaign -- refuse it, and say which of the
+            # two failures happened so the audience query can be repaired.
+            if not msisdns:
+                _runner = query_sc if use_sc else query_op
+                _repaired = _as_msisdn_filter(filter_sql, _runner)
+                if _repaired:
+                    filter_sql = _repaired
+                    targets = _runner(filter_sql)
+                    msisdns = [str(r["msisdn"]) for r in targets if r.get("msisdn")]
+
+            if not msisdns:
+                _rows = [r for r in targets if "_correction" not in r]
+                if _rows:
+                    _cols = ", ".join(sorted({k for r in _rows for k in r})) or "none"
+                    return {"type": "error", "text":
+                            f"The audience query returned {len(_rows)} row(s) but no msisdn "
+                            f"column (columns: {_cols}), so there is nobody to target. Nothing "
+                            f"was sent for review. The filter must SELECT msisdn — a COUNT or "
+                            f"an average cannot be a campaign audience."}
+                return {"type": "error", "text":
+                        "The audience query matched 0 subscribers, so nothing was sent for "
+                        "review. Widen the filter or check it against the data first — a "
+                        "campaign with no targets cannot be created."}
+
+        # A reviewer approving this is committing to contacting real customers, so
+        # the card has to carry what that decision needs: the actual offer terms
+        # (an offer id tells them nothing) and who the audience is commercially.
+        # Both are resolved here, at propose time, rather than left to whoever
+        # opens the modal to go and look up.
+        # The offers table declares which campaign each offer belongs to. Nothing
+        # used to read that column, so a VoLTE_sunset campaign could go to review
+        # carrying "MBB to FWA Conversion" -- rendered with its real discount and
+        # real validity, which is what made it look authoritative rather than
+        # obviously wrong. The catalogue already states the constraint; enforce it
+        # from the column rather than from a hardcoded list of pairings.
+        offer = {}
+        if offer_id:
+            _o = query_op("SELECT offer_name, discount_pct, bonus_data_gb, validity_days, "
+                          "target_technology, target_campaign, is_active "
+                          f"FROM offers WHERE offer_id={int(offer_id)}")
+            if not _o or "error" in _o[0]:
+                return {"type": "error", "text":
+                        f"Offer {offer_id} does not exist in the catalogue. Query the offers "
+                        f"table for a real offer_id before proposing a campaign."}
+            offer = dict(_o[0])
+            _decl = (offer.get("target_campaign") or "").strip()
+            if ctype and _decl and _decl.lower() != str(ctype).strip().lower():
+                _valid = query_op(
+                    "SELECT offer_id, offer_name FROM offers WHERE is_active=1 AND "
+                    f"lower(target_campaign)='{str(ctype).strip().lower().replace(chr(39), '')}' "
+                    "ORDER BY offer_id")
+                _opts = ", ".join(f"{r['offer_id']} = {r['offer_name']}"
+                                  for r in (_valid or []) if "error" not in r)
+                return {"type": "error", "text":
+                        f"Offer {offer_id} ('{offer.get('offer_name')}') belongs to the "
+                        f"'{_decl}' campaign, not '{ctype}'. Nothing was sent for review. "
+                        + (f"Valid offers for {ctype}: {_opts}. Re-propose with one of those."
+                           if _opts else
+                           f"The catalogue has no active offer for '{ctype}' — either pick a "
+                           f"different campaign type or create the offer first.")}
+            if offer.get("is_active") == 0:
+                return {"type": "error", "text":
+                        f"Offer {offer_id} ('{offer.get('offer_name')}') is inactive and cannot "
+                        f"be used in a campaign. Nothing was sent for review."}
+            offer.pop("is_active", None)
+
+        audience = {}
+        try:
+            if msisdns:
+                conn = sqlite3.connect(OP_DB)
+                conn.row_factory = sqlite3.Row
+                marks = ",".join("?" * len(msisdns))
+                row = conn.execute(
+                    f"SELECT COUNT(*) n, ROUND(AVG(arpu),2) avg_arpu, SUM(is_hvc) hvc, "
+                    f"ROUND(SUM(arpu),0) monthly_revenue FROM customer_value "
+                    f"WHERE month=(SELECT MAX(month) FROM customer_value) "
+                    f"AND msisdn IN ({marks})", msisdns).fetchone()
+                conn.close()
+                if row and row["n"]:
+                    audience = {"avg_arpu": row["avg_arpu"], "hvc_count": row["hvc"],
+                                "monthly_revenue": row["monthly_revenue"]}
+        except Exception as e:
+            print(f"[Propose] audience profile skipped: {e}")
+
+        bits = [f"{ctype or 'campaign'} targeting {len(msisdns):,} subscribers"]
+        if audience.get("hvc_count"):
+            bits.append(f"{audience['hvc_count']:,} high-value")
+        if audience.get("avg_arpu"):
+            bits.append(f"avg ARPU {audience['avg_arpu']} Yuan")
+        summary = " · ".join(bits)
+
+        ok, detail = _publish_for_review("campaign", name, summary, {
+            "campaign_type": ctype, "offer_id": offer_id, "offer": offer,
+            "audience": audience, "msisdns": msisdns, "sql": filter_sql[:400]})
+        if not ok:
+            print(f"[Propose] campaign '{name}' NOT queued: {detail[:80]}")
+            return {"type": "error", "text": detail}
+
+        print(f"[Propose] campaign '{name}' -> ops portal id={detail}, {len(msisdns)} targets")
         return {
             "type": "success",
-            "text": f"Campaign **{name}** created (ID {campaign_id}) — {ctype}, {count:,} targets, status: active"
+            "text": (f"Campaign **{name}** ({ctype}, {len(msisdns):,} targets) has been sent to "
+                     f"the Ops Portal and is waiting for review. Nothing has been written to the "
+                     f"database yet — a reviewer approves, edits or rejects it there, and only an "
+                     f"approval creates the campaign."),
         }
 
     # ── acknowledge_alarm ─────────────────────────────────────────
@@ -3451,19 +4201,79 @@ def _dispatch_action_json(action: dict, context: str = "") -> dict:
         if severity: wh.append("a.severity=?"); p.append(severity)
         if region:   wh.append("s.region=?");   p.append(region)
         join = "JOIN cells c ON a.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id" if region else ""
-        count_r = query_sc(f"SELECT COUNT(*) as n FROM network_alarms a {join} WHERE {' AND '.join(wh)}")
+        # The count used to go through query_sc(), which takes SQL only and binds
+        # no parameters -- so a filtered acknowledge raised on the unbound '?',
+        # returned [{'error': ...}], and then raised KeyError on count_r[0]["n"]
+        # AFTER the UPDATE had already committed. The user saw a traceback while
+        # the alarms were silently cleared. Count and update on one connection,
+        # with the parameters actually bound.
         conn = sqlite3.connect(SC_DB)
-        conn.execute(
-            f"UPDATE network_alarms SET is_active=0 WHERE alarm_id IN "
-            f"(SELECT a.alarm_id FROM network_alarms a {join} WHERE {' AND '.join(wh)})",
-            tuple(p)
-        )
-        conn.commit()
-        conn.close()
-        n = count_r[0]["n"] if count_r else "?"
-        return {"type": "success", "text": f"{n} alarms acknowledged." +
+        try:
+            where = " AND ".join(wh)
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM network_alarms a {join} WHERE {where}",
+                tuple(p)).fetchone()[0]
+            if not n:
+                return {"type": "success", "text": "No matching active alarms to acknowledge." +
+                        (f" Region: {region}" if region else "") +
+                        (f" Severity: {severity}" if severity else "")}
+            conn.execute(
+                f"UPDATE network_alarms SET is_active=0 WHERE alarm_id IN "
+                f"(SELECT a.alarm_id FROM network_alarms a {join} WHERE {where})",
+                tuple(p))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            return {"type": "error", "text": f"Acknowledge failed, nothing changed: {e}"}
+        finally:
+            conn.close()
+        return {"type": "success", "text": f"{n:,} alarms acknowledged." +
                 (f" Region: {region}" if region else "") +
                 (f" Severity: {severity}" if severity else "")}
+
+    # ── send_sms ──────────────────────────────────────────────────
+    # Advertised to the model in ACT_SYSTEM but never implemented, so a confirmed
+    # SMS proposal died on "Unknown action type: send_sms". Like campaigns, it
+    # goes to the Ops Portal for review rather than writing sms_log here -- the
+    # portal already knows how to send an approved batch.
+    if atype == "send_sms":
+        message    = (action.get("message") or "").strip()
+        filter_sql = action.get("msisdn_filter_sql", "")
+        name       = action.get("name") or "Agent SMS"
+        if not message:
+            return {"type": "error", "text": "No message text in the proposal — nothing sent."}
+        # ACT_SYSTEM offers this as {"action":"send_sms","campaign_id":N,"message":...},
+        # so recipients normally come from that campaign's targets; a filter SQL is
+        # accepted too for an ad-hoc send.
+        campaign_id = action.get("campaign_id")
+        msisdns = []
+        if campaign_id:
+            rows = query_op(f"SELECT msisdn FROM campaign_targets WHERE campaign_id={int(campaign_id)}")
+            if rows and "error" in rows[0]:
+                return {"type": "error", "text": f"Could not read campaign {campaign_id}: {rows[0]['error']}"}
+            msisdns = [str(r["msisdn"]) for r in (rows or []) if r.get("msisdn")]
+            name = action.get("name") or f"SMS for campaign {campaign_id}"
+        elif filter_sql:
+            sc_tables = ["subscribers", "mobility", "devices", "coverage", "kpis", "cells", "sites"]
+            targets = (query_sc if any(t in filter_sql.lower() for t in sc_tables) else query_op)(filter_sql)
+            if targets and "error" in targets[0]:
+                return {"type": "error", "text": f"Could not resolve recipients: {targets[0]['error']}"}
+            msisdns = [str(r["msisdn"]) for r in (targets or []) if r.get("msisdn")]
+        if not msisdns:
+            return {"type": "error",
+                    "text": ("No recipients resolved — give either a campaign_id whose targets "
+                             "exist, or a msisdn_filter_sql that matches somebody. Nothing sent.")}
+        ok, detail = _publish_for_review(
+            "sms", name, f"SMS to {len(msisdns):,} subscribers",
+            {"message": message, "msisdns": msisdns, "sql": filter_sql[:400]})
+        if not ok:
+            print(f"[Propose] sms '{name}' NOT queued: {detail[:80]}")
+            return {"type": "error", "text": detail}
+        print(f"[Propose] sms '{name}' -> ops portal id={detail}, {len(msisdns)} recipients")
+        return {"type": "success",
+                "text": (f"An SMS to **{len(msisdns):,}** subscribers has been sent to the Ops "
+                         f"Portal for review. Nothing has been sent yet — a reviewer can edit the "
+                         f"message text there, and only an approval delivers it.")}
 
     return {"type": "error", "text": f"Unknown action type: {atype}"}
 
@@ -3703,6 +4513,34 @@ def _is_conversational(text: str, has_prior_context: bool) -> bool:
             return True
     return False
 
+
+
+# A follow-up that asks for a FIGURE must never reach _direct_reply, which
+# answers from conversation memory and runs no SQL at all. Asked "what about all
+# the complaints" the classifier said 'converse', and the reply invented 8,912
+# total and 6,800 resolved against real values of 28,360 and 26,298 -- with no
+# steps shown, so nothing on screen revealed that no query had run. The
+# classifier is one LLM call and it will misjudge sometimes; this override is
+# deterministic, so it cannot.
+_DATA_DEMAND_RE = re.compile(
+    r"\b(how many|how much|how long|count|total|number of|list|show me|give me|"
+    r"what about|how about|all the|breakdown|average|median|sum|top \d+|"
+    r"which|who are|percentage|percent|ratio|rate of|compare)\b", re.I)
+
+_DATA_NOUN_RE = re.compile(
+    r"\b(subscriber|subscribers|customer|customers|user|users|complaint|complaints|"
+    r"alarm|alarms|incident|incidents|churn|arpu|revenue|hvc|hvcs|fwa|volte|vowifi|"
+    r"5g|4g|3g|2g|region|regions|city|cities|nation|site|sites|cell|cells|"
+    r"plan|plans|offer|offers|campaign|campaigns|usage|throughput|latency|"
+    r"drop rate|coverage|device|devices|billing|bill|segment|segments|"
+    r"platinum|gold|silver|bronze|resolved|closed|open)\b", re.I)
+
+
+def _demands_data(question: str) -> bool:
+    """True when the message asks for a figure the database holds."""
+    return bool(_DATA_DEMAND_RE.search(question) and _DATA_NOUN_RE.search(question))
+
+
 def _classify_intent(user_input: str, mem_ctx: str) -> str:
     """Ask the LLM to classify the user's intent given conversation context.
     Returns 'query' (needs fresh SQL), 'suggest' (wants advice from existing data),
@@ -3723,6 +4561,45 @@ def _classify_intent(user_input: str, mem_ctx: str) -> str:
     if label not in ("query", "suggest", "converse"):
         return "query"  # safe default
     return label
+
+
+
+_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _significant_numbers(text: str) -> set:
+    """Figures a reader would take as data. Normalised so 28,360 == 28360."""
+    out = set()
+    for raw in _NUM_RE.findall(text or ""):
+        norm = raw.replace(",", "").rstrip(".")
+        if not norm:
+            continue
+        try:
+            val = float(norm)
+        except ValueError:
+            continue
+        # Ordinals, small counts and years are not claims about the data.
+        if val < 10:
+            continue
+        if 1900 <= val <= 2100 and "." not in norm:
+            continue
+        out.add(norm)
+    return out
+
+
+def _ungrounded_numbers(text: str, context: str) -> list:
+    """Numbers stated in `text` that do not appear anywhere in `context`.
+
+    _direct_reply answers purely from the conversation, so every figure it
+    states must already be in that conversation. Anything else was invented.
+    Asked "what about all the complaints" it replied with 8,912 total and 6,800
+    resolved, against real values of 28,360 and 26,298 -- no query ran, and no
+    step appeared in the UI to reveal that. The prompt already asked the model
+    not to do this; asking is not enough.
+    """
+    ctx = (context or "").replace(",", "")
+    return [n for n in _significant_numbers(text) if n not in ctx]
+
 
 def _direct_reply(user_input: str, mem_ctx: str, mode: str) -> dict:
     """Answer directly from conversation context — no SQL, no chain.
@@ -3772,13 +4649,56 @@ def _direct_reply(user_input: str, mem_ctx: str, mode: str) -> dict:
     text = _llm(system, prompt, max_tokens=500, allow_thinking=False)
     return {"type": "analysis", "text": text}
 
+# Substring matching used to decide these, which meant any message CONTAINING
+# "ok" confirmed a pending action -- "take a look at that" launched the campaign --
+# and anything containing "no" cancelled it: "Northern Water Tribe", "nothing
+# else?". The gate in front of a database write cannot be a substring scan.
+# A confirmation is now the whole message, allowing only trivial punctuation
+# and a leading filler word.
+_CONFIRM_FILLER = {"please", "ok", "okay", "alright", "sure", "and", "then",
+                   "so", "now", "just", "yeah", "yep", "lets", "let's"}
+
+
+def _decision_tokens(text: str) -> list:
+    """The message reduced to meaningful words, punctuation stripped."""
+    cleaned = re.sub(r"[^\w\s'’-]", " ", (text or "").lower())
+    return [w for w in cleaned.split() if w]
+
+
+def _is_decision(text: str, words: set) -> bool:
+    """Whole-message match against a decision vocabulary.
+
+    Accepts 'confirm', 'yes please', 'ok go ahead' -- rejects any sentence that
+    merely happens to contain one of the words.
+    """
+    toks = _decision_tokens(text)
+    if not toks or len(toks) > 4:
+        return False
+    if " ".join(toks) in words:
+        return True
+    # every word is itself a decision word: "no cancel", "yes confirm"
+    if all(t in words for t in toks):
+        return True
+    # Trim filler from the ENDS only, so "ok go ahead" keeps the phrase "go
+    # ahead" intact instead of losing "go" from the middle of it.
+    lo, hi = 0, len(toks)
+    while lo < hi and toks[lo] in _CONFIRM_FILLER:
+        lo += 1
+    while hi > lo and toks[hi - 1] in _CONFIRM_FILLER:
+        hi -= 1
+    core = toks[lo:hi]
+    if not core:
+        # the whole message was filler: "ok", "okay please"
+        return any(t in words for t in toks)
+    return " ".join(core) in words
+
+
 def _is_confirmation(text: str) -> bool:
-    t = text.lower().strip().rstrip(".,!")
-    return t in CONFIRM_WORDS or any(w in t for w in CONFIRM_WORDS)
+    return _is_decision(text, CONFIRM_WORDS)
+
 
 def _is_denial(text: str) -> bool:
-    t = text.lower().strip()
-    return t in DENY_WORDS or any(w in t for w in DENY_WORDS)
+    return _is_decision(text, DENY_WORDS)
 
 # ═══════════════════════════════════════════════════════════════════════
 # TOOL-CALLING LOOP  (structured output via Bedrock converse toolConfig)
@@ -3822,14 +4742,14 @@ SQL REFERENCE PATTERNS:
 RULES:
 - Never guess numbers — always query first. Run at least one query before concluding unless the conversation already has the data.
 - All monetary values (ARPU, prices, revenue) are in Yuan — never $ or USD or TND.
-- Never use commas in numbers: 13532 not 13,532.
+- Never use commas in numbers: write digits only, e.g. 1234567 not 1,234,567.
 - Verify arithmetic before concluding: if a query returns grouped counts, the "remaining" group is total minus the sum of the other groups. Never reuse the total as a subgroup count.
 - RANKING & COMPARISON: for any "which/top/best/highest/most" question across regions, segments, plans or technologies, compute EVERY metric you need in ONE query grouped by that entity and ORDER BY the metric the question is actually about — default to volume/count unless the user explicitly asked for value/revenue/ARPU. Keep secondary metrics on the same row as the primary; NEVER rank by one metric (e.g. ARPU) while quoting another (e.g. counts), and say which metric you ranked by. If you ran separate queries, your last step must reconcile them into one ranked view before concluding. If "biggest" is genuinely ambiguous (volume vs revenue), rank by volume and name the value leaders separately instead of silently choosing one.
 - ONLY CLAIM WHAT YOU QUERIED: every statement in your answer must be supported by a row your executed queries actually returned. This applies HARDEST to negative and causal claims — "there are no active alarms", "this is not caused by X", "it isn't a radio-side problem", "nothing else is affected". You can only rule something OUT if you ran a query that looked for it and got zero rows. If you did not query alarms, say nothing about alarms. If you did not query RSRP/latency/throughput, do not claim the issue is or isn't related to them. When a root_cause column already tells you the cause, REPORT that cause — do not speculate about mechanisms (CDN vs backhaul vs radio) you never measured. If you think an extra check is worth making, run it; otherwise stay silent about it. An answer that states only what the data shows is strictly better than one padded with unverified diagnosis.
 
 BEFORE calling conclude — if you have run only 1 query so far and the question has a commercial angle, you MUST run 1 enrichment query first. Match it to the context:
 - Top ARPU / platinum subscribers → check what plan they're on (already on the highest tier?) or whether they have 5G-capable devices not yet on 5G
-- Low ARPU / bronze subscribers → check churn_risk_score to identify who is actually at risk of leaving
+- Low ARPU / bronze subscribers → check churn_label / churn_risk_score to rank who shows the most risk factors (an indicator, not a prediction)
 - Poor KPI result (low throughput, high drop rate, low availability) → check active alarm count on those cells to see if it's a known fault
 - 3G subscriber count → check how many of them have 4G/5G-capable devices to quantify the migration opportunity
 - 5G upsell candidates → check their avg ARPU to estimate revenue impact of converting them
@@ -4033,12 +4953,60 @@ def _ungrounded_negatives(text: str, steps_log=None) -> list:
     return [] if looked_and_found_nothing else hits
 
 
+
+
+def _fabricated_total(ung: list, results_blob: str) -> str:
+    """Catch a single invented aggregate.
+
+    _ground_text needs two or more ungrounded numbers before it regenerates, so
+    one wrong figure always passed -- and the one figure a model gets wrong is
+    usually the headline total. Asked for a complaint breakdown it returned the
+    four status counts correctly and then stated a total of 28,672 against a real
+    28,474: every component right, the sum invented, and only one bad number in
+    the answer so the ratio test never fired.
+
+    A number larger than anything queried is only legitimate if it is the sum of
+    what was queried. Anything else is arithmetic the model did not do.
+    """
+    try:
+        nums = []
+        for raw in re.findall(r"\d[\d,]*(?:\.\d+)?", results_blob or ""):
+            try:
+                nums.append(float(raw.replace(",", "")))
+            except ValueError:
+                pass
+        if not nums:
+            return ""
+        biggest = max(nums)
+        total = sum(nums)
+        for u in ung:
+            try:
+                val = float(str(u).replace(",", ""))
+            except ValueError:
+                continue
+            if val <= biggest:
+                continue                      # within the range of real values
+            # 1% was wider than the error it was meant to catch (285 on a
+            # 28,474 total, against a 200 mistake). A stated total should be
+            # exact; this only tolerates light rounding.
+            if abs(val - total) <= max(1.0, total * 0.002):
+                continue                      # it IS the sum -- legitimate
+            return str(u)
+    except Exception:
+        pass
+    return ""
+
+
 def _ground_text(text: str, results_blob: str, question: str, steps_log=None) -> str:
     """If the answer cites numbers absent from the query results (confabulation), or
     asserts an unverified negative, regenerate it once from the real rows.
     Shared by the tools + text paths."""
     ung, tot = _grounding_issues(text, results_blob)
     bad_numbers   = bool(tot and len(ung) >= 2 and len(ung) >= 0.5 * tot)
+    # A lone invented aggregate never met the ratio test above.
+    bad_total     = _fabricated_total(ung, results_blob)
+    if bad_total:
+        bad_numbers = True
     bad_negatives = _ungrounded_negatives(text, steps_log)
     if not (bad_numbers or bad_negatives):
         return text
@@ -4046,7 +5014,13 @@ def _ground_text(text: str, results_blob: str, question: str, steps_log=None) ->
     rules = ["Restate the analysis using ONLY numbers that appear in the provided query "
              "results. Do not invent figures or extrapolate beyond the data."]
     if bad_numbers:
-        print(f"[Grounding] {len(ung)}/{tot} cited numbers absent from results — regenerating")
+        if bad_total:
+            print(f"[Grounding] fabricated total {bad_total} (exceeds every queried value "
+                  f"and is not their sum) — regenerating")
+        else:
+            print(f"[Grounding] {len(ung)}/{tot} cited numbers absent from results — regenerating")
+        rules.append("If you state a total, it must equal the sum of the components you cite. "
+                     "Add them up before writing the number.")
     if bad_negatives:
         print(f"[Grounding] unverified negative claim(s) {bad_negatives[:3]} — regenerating")
         rules.append(
@@ -4132,9 +5106,17 @@ def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
             extract_sql = raw
 
     result = {"type": "analysis", "text": text, "steps": steps_log}
+    # Model-written recommendations are held to the same bar as generated ones.
+    # The tools path used to pass them straight through, so a live fault came
+    # back with "Monitor the resolution timeline" -- fluent, and committing to
+    # nothing. Hedge verbs are dropped; if too little survives the list is
+    # rewritten against the incident or commercial brief.
     recs = inp.get("recommendations")
-    if isinstance(recs, list) and recs:
-        result["recommendations"] = [str(r) for r in recs]
+    _refined = _refine_recommendations(
+        [str(r) for r in recs] if isinstance(recs, list) else [],
+        question, result.get("text") or text)
+    if _refined:
+        result["recommendations"] = _refined
     if chart:
         result["chart"] = chart
     if isinstance(inp.get("strategy_diagram"), dict) and inp["strategy_diagram"]:
@@ -4146,7 +5128,41 @@ def _finalize_tools(inp: dict, question: str, treemap_ctx: str,
     return result
 
 
-def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
+
+# An imperative to bring something into existence is a request to ACT, not a
+# question to answer. "Create a 5G upsell campaign for Ba Sing Se subscribers"
+# was ending in conclude with an analysis of the opportunity: nothing was
+# executed, so the human-in-the-loop guarantee held, but the request never
+# reached the approval path either. The prompt already asked for propose_action
+# on these; asking was not enough, so the conclude is refused once instead.
+_ACTION_IMPERATIVE_RE = re.compile(
+    r"\b(create|launch|start|set up|send|assign|enrol|enroll|add|register|"
+    r"schedule|roll out|activate|target them|push|"
+    # "propose" was missing, which is the word most people reach for when they
+    # want something put in front of a reviewer rather than executed -- and it
+    # is the name of the tool itself. Without it the request read as a question
+    # and a conclude was accepted, so the answer was correct but nothing was
+    # ever queued for approval.
+    r"propose|draft|prepare|put together|build)\b", re.I)
+
+# A question ABOUT actions is not a request to take one.
+_ACTION_QUESTION_RE = re.compile(
+    r"\b(how many|how much|which|what|who|show|list|compare|report|"
+    r"analys|analyz|breakdown|do we have|are there|is there)\b", re.I)
+
+
+def _wants_action(question: str) -> bool:
+    """True when the user is asking for something to be brought into existence."""
+    if not _ACTION_IMPERATIVE_RE.search(question):
+        return False
+    # "how many subscribers should we target" asks for a number, not an action.
+    if _ACTION_QUESTION_RE.search(question):
+        return False
+    return True
+
+
+def _run_chain_tools(question: str, max_steps: int = 10,
+                     action_request: bool = None) -> dict:
     global _tools_ok
     _cached = _cache_lookup(question)
     if _cached:
@@ -4202,6 +5218,12 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
     last_sql = None
     steps_log = []
     seen = set()
+    _route_pushed = False
+    # `question` here is the ENRICHED input -- conversation memory is prepended
+    # to it -- so testing it directly let any earlier turn containing 'how many'
+    # or 'which' cancel the action check. run_agent decides from the bare user
+    # message instead; the fast path already had to do the same thing.
+    _is_action = _wants_action(question) if action_request is None else action_request
     treemap_ctx = ""
     results_blob = ""   # accumulated query rows, for the grounding check at conclude
 
@@ -4260,6 +5282,29 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
         for tu in tool_uses:
             name = tu.get("name"); tid = tu.get("toolUseId"); inp = tu.get("input") or {}
 
+            if name == "conclude" and _is_action:
+                if not _route_pushed:
+                    # Refuse once: this asked for something to be created.
+                    _route_pushed = True
+                    steps_log.append("[rejected: analysed an action request]")
+                    tool_results.append((tid,
+                        "This request asks for something to be CREATED, not explained. Do not "
+                        "call conclude. Call propose_action with a description of exactly what "
+                        "you would create -- the campaign name, its type, the audience and its "
+                        "size, and the offer -- so a human can approve or reject it. You have "
+                        "already gathered the counts you need."))
+                    continue
+                # It concluded again after being told. Asking twice and accepting an
+                # analysis would silently drop the request the user actually made,
+                # so the analysis becomes the proposal: the user still gets a
+                # confirm/cancel gate and nothing runs without one. Its own text
+                # already describes what it would create.
+                _desc = (inp.get("text") or "").strip()
+                if _desc:
+                    print("[Tools v2] conclude on an action request -> treating as proposal")
+                    steps_log.append("[routed: conclude -> proposal]")
+                    finished = {"type": "proposal", "text": _desc, "steps": steps_log}
+                    break
             if name == "conclude":
                 print("[Tools v2] conclude tool called")
                 finished = _finalize_tools(inp, question, treemap_ctx, is_treemap, last_sql, steps_log, results_blob)
@@ -4313,8 +5358,22 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
                     _n = len(rows)
                     cap = 200 if is_treemap else 30
                     sample = [dict(r) for r in rows[:cap]]
-                    tool_results.append((tid, f"{_n} rows: {json.dumps(sample, default=str)}"
-                                              + (f" (showing {cap} of {_n})" if _n > cap else "")))
+                    # The cap notice used to trail the JSON, so a truncated result read
+                    # like a complete one: asked about a region the model summed the
+                    # first rows of a 5,743-row result, reported 27 subscribers against
+                    # 11,229, and stated that three value segments were absent -- they
+                    # were simply below the cut. The warning now leads, and says which
+                    # conclusions a slice cannot support.
+                    if _n > cap:
+                        head = (f"TRUNCATED SAMPLE — {_n} rows matched, showing only the first "
+                                f"{cap} in the query's own sort order. This is a SLICE: do NOT "
+                                f"total it, do NOT treat categories missing from it as absent "
+                                f"from the data, and do NOT describe it as the full picture. "
+                                f"If you need totals or category coverage, re-query with "
+                                f"aggregates (COUNT/SUM with GROUP BY). Sample: ")
+                    else:
+                        head = f"{_n} rows: "
+                    tool_results.append((tid, head + json.dumps(sample, default=str)))
                     steps_log.append(f"[sql {_n}] {sql[:90]}")
                     results_blob += json.dumps(sample, default=str)
                     if is_treemap:
@@ -4330,21 +5389,48 @@ def _run_chain_tools(question: str, max_steps: int = 8) -> dict:
             return finished
 
         if tool_results:
-            messages.append({"role": "user", "content": [
-                {"toolResult": {"toolUseId": tid, "content": [{"text": str(txt)[:6000]}]}}
-                for tid, txt in tool_results
-            ]})
+            _msg = [{"toolResult": {"toolUseId": tid, "content": [{"text": str(txt)[:6000]}]}}
+                    for tid, txt in tool_results]
+            # Tell the model when it is about to run out of steps. Without this it
+            # explores until the budget dies and never calls conclude -- and the
+            # exhaustion synthesis below cannot emit a chart or a strategy diagram,
+            # receives rows stripped of the SQL that produced them (so a scoped
+            # average comes out as "142.86, unassigned to any group"), and fills
+            # the gaps it perceives by inventing. Ending the chain properly is
+            # worth more than one more query.
+            _left = max_steps - step - 1
+            if 0 < _left <= 2 and results_blob:
+                _msg.append({"text":
+                    f"You have {_left} step(s) left. Stop querying and call the conclude tool "
+                    f"NOW with what you already have. Every number in your answer must come "
+                    f"from a result above — if something was never measured, leave it out "
+                    f"rather than estimating it. Include a chart or strategy_diagram if the "
+                    f"answer breaks the base into groups."})
+            messages.append({"role": "user", "content": _msg})
 
     # Step budget exhausted (or mid-chain failure). Don't discard the rows we already
     # have — synthesize from them, same as _run_chain does with its context.
     if results_blob:
         print("[Tools v2] step budget exhausted → synthesizing from gathered data")
         try:
+            # results_blob is rows only. Pairing each result with the query that
+            # produced it is what stops a scoped average being reported as a
+            # floating number of unknown meaning -- and stops the model inferring
+            # a missing category (it once reported 5,851 "unclassified"
+            # subscribers when the technology split it had just run covered the
+            # entire active base).
+            _steps_ctx = "\n".join(str(s) for s in (steps_log or [])[-8:])
             summary = _llm(
                 "You are a telecom analyst. Summarize findings and recommend actions. "
-                "Use ONLY the data provided — never invent numbers. If the data only "
-                "partially answers the question, say which part is still missing.",
-                f"Question: {question}\n\nData gathered:\n{results_blob[-6000:]}\n\nAnalysis:"
+                "Use ONLY the data provided — never invent numbers. Every figure you "
+                "write must appear in the results below; do NOT derive a residual, a "
+                "remainder, or an 'other/unclassified' group by subtraction. Each result "
+                "means exactly what its query measured — if a query was scoped to a "
+                "subset, say so, and if you cannot tell what a number refers to, leave "
+                "it out. If the data only partially answers the question, say which "
+                "part is still missing.",
+                f"Question: {question}\n\nQueries run:\n{_steps_ctx}\n\n"
+                f"Data gathered:\n{results_blob[-6000:]}\n\nAnalysis:"
             )
         except Exception as e:
             print(f"[Tools v2] exhaustion synthesis failed: {e}")
@@ -4435,17 +5521,18 @@ _CLARIFY_SYS = (
     "right now, which service is affected — video streaming / mobile data / voice calls / all "
     "services — the root cause, severity, and when it started/was resolved).\n"
     "NEVER ask the user to define a term the data already defines. An 'HVC'/high-value customer "
-    "is the is_hvc flag (gold/platinum value_segment). A 'streaming issue' / 'issue' / 'problem' "
+    "is the is_hvc flag (value_segment='platinum', the top decile). A 'streaming issue' / 'issue' / 'problem' "
     "is a row in the live issue log — it is NOT for the user to redefine as throughput, latency "
     "or dropped calls. Questions about who is having issues right now are ANSWERABLE AS ASKED: "
     "return {\"clarify\": false}.\n\n"
+    "THE TEST FOR UNDER-SPECIFICATION: a question is under-specified when it names an ACTION or an OPPORTUNITY -- upsell, migration, conversion, retention, targeting, a campaign, who to prioritise -- but does NOT name the POPULATION it applies to. An opportunity among whom? Everyone technically eligible, only the high-value ones because a campaign budget is finite, or only those also at risk of leaving? Those are different lists, different campaigns and different costs, so picking one silently answers a question nobody asked, and the answer gives no clue which reading was used. Ask in that case.\nNaming a BREAKDOWN DIMENSION does not name the population: 'by region', 'per city', 'by segment' say how to slice the answer, not who is in it.\nA question that DOES name its population is answerable as asked, even if it also names an action -- do not ask again.\n\n"
     'If the question is specific enough to answer directly, output exactly: {"clarify": false}\n'
     "ONLY if a key choice would MEANINGFULLY change the answer, output:\n"
     '{"clarify": true, "question": "<one short question>", "options": ['
     '{"label": "<short choice>", "query": "<a complete standalone question to run>"}, ...]}\n'
     "2-4 options, each a fully self-contained question. Always include a final option "
     '{"label": "Just decide for me", "query": "<the single most useful interpretation>"}.\n'
-    "Strongly prefer clarify:false — only ask when truly necessary. Output ONLY the JSON."
+    "Prefer clarify:false. Ask only when a key choice would meaningfully change the answer — most often when the population an action applies to is unstated. Output ONLY the JSON."
 )
 
 def _llm_quiet(system, prompt, **k):
@@ -4458,10 +5545,65 @@ def _llm_quiet(system, prompt, **k):
     finally:
         _streaming_queue = saved
 
+
+# The vagueness gate is protected by a keyword pre-filter so specific questions
+# never pay for an LLM call. That list catches vagueness which announces itself
+# ("best", "worst", "improve", "issues") and misses vagueness that does not:
+# "how is Ba Sing Se" names a place, no metric, and could mean network health,
+# subscriber mix, revenue, churn or live incidents -- yet hits no marker, so the
+# gate was never even consulted. This is the missing half: an open enquiry frame
+# with no measurable noun in it is under-specified by construction.
+_OPEN_ENQUIRY_RE = re.compile(
+    r"^\s*(how(?:'s| is| are| about)|what(?:'s| is| are)?\s+(?:about|the situation|going on)|"
+    r"tell me about|talk to me about|give me (?:an? )?(?:picture|overview|rundown|summary)|"
+    r"status (?:of|on)|anything on|update on|overview of|brief me on|walk me through)\b",
+    re.I)
+
+# If the question names something measurable, it is not this kind of vague.
+_MEASURE_NOUN_RE = re.compile(
+    r"\b(subscriber|customer|user|arpu|revenue|churn|throughput|latency|drop|"
+    r"availability|alarm|incident|complaint|coverage|device|handset|plan|offer|"
+    r"campaign|usage|volte|hvc|segment|count|number|rate|score|nps|quality|"
+    r"performance|kpi|sunset|upsell|migration|fwa|billing|payment|tenure|"
+    r"how many|how much|5g|4g|3g|2g)\b", re.I)
+
+
+def _is_open_enquiry(question: str) -> bool:
+    """True for 'how is X' style questions that name no measure at all."""
+    q = (question or "").strip()
+    if not _OPEN_ENQUIRY_RE.match(q):
+        return False
+    if _MEASURE_NOUN_RE.search(q):
+        return False          # "how is 5G coverage in Omashu" is specific enough
+    return len(q.split()) <= 12
+
+# The clarify gate runs on its own small prompt, which described the DATA but
+# never the geography. Asked "how is ba sing se" the model did not recognise a
+# place at all and offered "business segmentation" and "base sizing" -- it was
+# guessing at an acronym. The names are invented, so there is nothing in the
+# model's own knowledge to fall back on; they have to be given to it.
+try:
+    _CLARIFY_PLACES = [r["region"] for r in
+                       query_sc("SELECT DISTINCT region FROM sites ORDER BY region")
+                       if isinstance(r, dict) and r.get("region")]
+except Exception:
+    _CLARIFY_PLACES = []
+if _CLARIFY_PLACES:
+    _CLARIFY_SYS += (
+        chr(10) + chr(10) +
+        "The geography in this data is INVENTED. The following are REGION names, "
+        "not acronyms or abbreviations -- if a question names one, it is a place, and you "
+        "must never ask the user what it stands for or offer expansions of it: "
+        + ", ".join(_CLARIFY_PLACES) + ". A question naming one of these still needs "
+        "clarifying if it names no measure, but the clarification is about WHICH MEASURE "
+        "they want for that region, never about what the name means." + chr(10))
+
+
 def _llm_clarify_gate(question: str):
     """Ask a clarifying question for genuinely vague/open requests. Returns a
     clarify dict or None. Gated by markers so clear questions skip the LLM call."""
-    if not any(m in question.lower() for m in _AMBIGUOUS_MARKERS):
+    _has_marker = any(m in question.lower() for m in _AMBIGUOUS_MARKERS)
+    if not _has_marker and not _is_open_enquiry(question):
         return None
     raw = _llm_quiet(_CLARIFY_SYS, f"Question: {question}\nJSON:", max_tokens=400, allow_thinking=False)
     if not raw or raw.startswith("ERROR"):
@@ -4564,6 +5706,89 @@ def _is_live_incident_q(question: str) -> bool:
     """True for 'who is having issues right now' style questions the live incident log answers as-asked."""
     return bool(_LIVE_NOW_RE.search(question) and _ISSUE_WORD_RE.search(question))
 
+# Terms the SCHEMA already defines. Chapter-5 rule: never ask the user to pin
+# down something that is a column value. "High churn risk" is churn_label='high',
+# "HVC" is is_hvc=1, "poor experience" is experience_label='poor' -- asking for a
+# cutoff on any of those is not caution, it is an obstacle, and it was stalling
+# every churn question behind a threshold prompt.
+
+# "HVC" is a column. "POTENTIAL HVC" is not -- there is no such segment, so any
+# threshold the model picks for it is invented. The schema-defined bypass below
+# exists so a question about a term the data already pins down is not stalled by
+# a cutoff prompt; a speculative qualifier puts the term back into genuinely
+# ambiguous territory, where asking is the right behaviour.
+# 'candidate' is deliberately NOT here: is_fwa_candidate is a real column.
+_UNDEFINED_QUALIFIER_RE = re.compile(
+    r"\b(potential|possible|prospective|likely|future|upcoming|emerging|"
+    r"near|nearly|almost|borderline|could be|would be|might be|"
+    r"on track to|about to)\b", re.I)
+
+_SCHEMA_DEFINED_RE = re.compile(
+    # ONLY terms that are themselves the threshold in question. Technology
+    # generations were in here and should never have been: '5G upsell
+    # opportunities by region' contains '5G', which made it skip the gate
+    # and answer one arbitrary reading of a genuinely ambiguous question.
+    r"\b(churn[_ ]?label|churn risk|high[- ]risk|risk bands?|"
+    r"hvc|hvcs|high[- ]value customers?|is_hvc|"
+    r"experience[_ ]?label|poor experiences?|"
+    r"mobility[_ ]?class|fwa candidates?)\b", re.I)
+
+
+def _is_schema_defined_q(question: str) -> bool:
+    """True when the threshold the question leans on is already a column value."""
+    if _UNDEFINED_QUALIFIER_RE.search(question):
+        return False          # 'potential HVC' is not a column -- let the gate ask
+    return bool(_SCHEMA_DEFINED_RE.search(question))
+
+
+
+
+def _maybe_clarify_speculative(question: str):
+    """A speculative qualifier on a term the schema defines exactly.
+
+    "HVC" is a column value; "potential HVC" is not, so any cutoff the model
+    picks for it is invented -- asked for potential HVCs it answered 13,959
+    using a threshold of its own devising (ARPU >= 60 and a 5G-capable device),
+    after first trying ARPU >= 75 with 50GB. Two different rules, neither in the
+    data. This is the one case where the term IS ambiguous, so the gate that
+    normally steps aside for schema-defined terms should engage instead.
+
+    Deterministic -- no model call, so it costs nothing on questions that miss.
+    """
+    m_qual = _UNDEFINED_QUALIFIER_RE.search(question)
+    m_term = _SCHEMA_DEFINED_RE.search(question)
+    if not (m_qual and m_term):
+        return None
+    qual = m_qual.group(0).lower()
+    term = m_term.group(0)
+    # read naturally in the prompt text: 'HVCs is a column value' -> 'HVC is'
+    if len(term) > 3 and term.lower().endswith('s') and not term.lower().endswith('ss'):
+        term = term[:-1]
+    # the user's own casing is echoed back, so 'hvc' would read as lowercase
+    if term.lower() in ('hvc', 'fwa', 'volte', 'vowifi', 'nps', 'arpu',
+                        '5g', '4g', '3g', '2g'):
+        term = term.upper()
+    return {
+        "type": "clarify",
+        "text": (f'"{qual} {term}" is not a segment the data defines — {term} is a column '
+                 f'value, so there is no threshold for being nearly one. Which reading did '
+                 f'you want?'),
+        "options": [
+            {"label": f"The tier directly below {term}",
+             "query": f"How many subscribers sit in the tier directly below {term}, "
+                      f"and what is their average ARPU?"},
+            {"label": f"Those closest to the {term} threshold without meeting it",
+             "query": f"Which subscribers are closest to the {term} threshold without "
+                      f"meeting it? Give the count and their average ARPU."},
+            {"label": "Let the agent define it — and say which rule it used",
+             "query": f"Choose a defensible rule for {qual} {term}, state that rule "
+                      f"explicitly in your answer, then give the count it produces."},
+        ],
+    }
+
+
+
+
 def _maybe_clarify(question: str):
     """Unified curiosity: baseline/threshold ask first (so 'high ARPU' style questions
     get a number input), then the deterministic subscriber-drill catalog (instant),
@@ -4571,6 +5796,15 @@ def _maybe_clarify(question: str):
     skip the whole gate — the incident log already defines every term in them."""
     if _is_live_incident_q(question):
         return None
+    # A schema-defined term needs no cutoff from the user, but the question may
+    # still be missing a breakdown dimension, so only the baseline gate is skipped.
+    # A speculative qualifier on a defined term is the one genuinely ambiguous
+    # case, and it must be checked before the schema-defined bypass below.
+    _spec = _maybe_clarify_speculative(question)
+    if _spec:
+        return _spec
+    if _is_schema_defined_q(question):
+        return _maybe_clarify_dimensions(question)
     return _maybe_clarify_baseline(question) or _maybe_clarify_dimensions(question) or _llm_clarify_gate(question)
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -4645,10 +5879,20 @@ def run_agent(user_input: str) -> dict:
     # LLM-based intent classifier — only runs when there's prior context
     if mem_ctx:
         _intent = _classify_intent(user_input, mem_ctx)
+        if _intent in ("converse", "suggest") and _demands_data(resolved_input):
+            print(f"[Intent] override {_intent} -> query (asks for a figure)")
+            _intent = "query"
         if _intent in ("converse", "suggest"):
             result = _direct_reply(user_input, mem_ctx, mode=_intent)
-            _memory.append({"role": "agent", "summary": _compress(result["text"])})
-            return result
+            # _direct_reply ran no SQL, so any figure it states must already be in
+            # the conversation. If it invented one, throw the reply away and answer
+            # the question properly through the query path instead.
+            _bad = _ungrounded_numbers(result.get("text", ""), mem_ctx)
+            if _bad:
+                print(f"[NumGuard] discarding no-query reply citing {_bad[:4]} -> querying instead")
+            else:
+                _memory.append({"role": "agent", "summary": _compress(result["text"])})
+                return result
         # _intent == "query" → fall through to normal chain
 
     # Fast single-shot path for simple metric questions ("how many 5G subs?",
@@ -4661,7 +5905,12 @@ def run_agent(user_input: str) -> dict:
     _q_low = _gate_q.lower()
     _treemapish = any(w in _q_low for w in
                       ("drilldown", "drill down", "drill-down", "tree", "treemap", "hierarchy", "breakdown"))
-    if not picked_clarify and _is_simple_metric(_gate_q) and not _treemapish:
+    # FAST_PATH=0 in the environment forces every question through the full
+    # reasoning loop, so the answer shows its working instead of a one-line
+    # figure. Slower (roughly 15-30s vs 4s) and it can hit the step budget,
+    # so it is a switch rather than the default.
+    _fast_enabled = os.environ.get('FAST_PATH', '1').strip().lower() not in ('0', 'false', 'off', 'no')
+    if _fast_enabled and not picked_clarify and _is_simple_metric(_gate_q) and not _treemapish:
         print(f"[FastPath] simple metric — '{_gate_q[:60]}'")
         result = _fast_query(resolved_input)
         _memory.append({"role": "agent", "summary": _compress(result.get("text", ""))})
@@ -4676,7 +5925,7 @@ def run_agent(user_input: str) -> dict:
     result = None
     if _TOOLS_ENABLED and _tools_ok:
         try:
-            result = _run_chain_tools(resolved_input)
+            result = _run_chain_tools(resolved_input, action_request=_wants_action(user_input))
         except _ToolsUnsupported as e:
             print(f"[Tools] falling back to text chain: {e}")
             result = None
@@ -4737,7 +5986,7 @@ def get_proactive_alerts() -> list:
     fwa = query_sc("""
         SELECT COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp
         JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month
-        WHERE mp.mobility_class='stationary' AND dm.total_data_gb > 30
+        WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1
         AND mp.month=(SELECT MAX(month) FROM mobility_profile)
     """)
     if fwa and fwa[0].get("n", 0) > 50:

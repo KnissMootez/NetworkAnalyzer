@@ -1,13 +1,21 @@
 {
   "python.defaultInterpreterPath": "${workspaceFolder}/networkanalyzer-env/Scripts/python.exe",
+  "python.terminal.activateEnvironment": true,
+
+  "terminal.integrated.defaultProfile.windows": "NetworkAnalyzer",
   "terminal.integrated.profiles.windows": {
     "NetworkAnalyzer": {
       "source": "PowerShell",
       "args": [
         "-NoExit",
         "-Command",
-        "& '${workspaceFolder}/networkanalyzer-env/Scripts/Activate.ps1'"
+        "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; $venv = @('${workspaceFolder}/networkanalyzer-env/Scripts/Activate.ps1','${workspaceFolder}/NetworkAnalyzer/networkanalyzer-env/Scripts/Activate.ps1') | Where-Object { Test-Path $_ } | Select-Object -First 1; if ($venv) { & $venv; Set-Location (Split-Path (Split-Path (Split-Path $venv))); Write-Host 'venv active - NetworkAnalyzer' -ForegroundColor Green } else { Write-Host 'networkanalyzer-env not found - run: python -m venv networkanalyzer-env' -ForegroundColor Yellow }"
       ]
     }
+  },
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "networkanalyzer-env": true
   }
 }

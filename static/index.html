@@ -70,6 +70,10 @@
       <option value="langgraph">LangGraph ☁ Bedrock</option>
     </select>
     <button class="btn-primary" onclick="App.applyModel()">APPLY MODEL</button>
+    <label class="sp-toggle" title="Off: every question runs the full reasoning loop. Slower, but each step is shown.">
+      <input type="checkbox" id="fastpath-toggle" checked onchange="App.setFastPath(this.checked)">
+      <span>Fast path for simple metrics</span>
+    </label>
   </div>
 
   <!-- Ops Portal link -->

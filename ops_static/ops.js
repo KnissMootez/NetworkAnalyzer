@@ -73,26 +73,72 @@ function openModal(action) {
     dlBtn.style.display = 'none';
   }
 
-  const lines = [];
-  if (payload.msisdns)         lines.push(`Targets: ${payload.msisdns.length} subscribers`);
-  if (payload.campaign_type)   lines.push(`Type: ${payload.campaign_type}`);
-  if (payload.message)         lines.push(`Message: ${payload.message}`);
-  if (payload.cell_ids)        lines.push(`Cells: ${payload.cell_ids.join(', ')}`);
-  if (payload.region)          lines.push(`Region: ${payload.region}`);
-  if (payload.file)            lines.push(`File: ${payload.file}`);
-  if (payload.filename)        lines.push(`File: ${payload.filename}`);
-  if (payload.row_count != null) lines.push(`Rows: ${payload.row_count}`);
-  if (payload.columns)         lines.push(`Columns: ${payload.columns.join(', ')}`);
-  if (payload.sql)             lines.push(`SQL: ${payload.sql.slice(0, 200)}…`);
-  if (payload.recommendations) {
-    lines.push(`\nRecommendations (${payload.recommendations.length}):`);
-    payload.recommendations.forEach((r, i) => {
-      const text = typeof r === 'string' ? r : r.text || JSON.stringify(r);
-      lines.push(`  ${i+1}. ${text}`);
-    });
+  // This used to flatten every payload into one monospace block, which suited the
+  // CSV exports it was written for and made a campaign proposal — the thing a
+  // reviewer actually has to make a decision about — look like a debug dump.
+  // The decision facts lead; the SQL is evidence, so it collapses.
+  const esc = s => String(s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const html = [];
+
+  if (payload.msisdns) {
+    html.push(`<div class="op-headline"><b>${payload.msisdns.length.toLocaleString()}</b>
+               <span>${action.type === 'sms' ? 'recipients' : 'subscribers targeted'}</span></div>`);
   }
 
-  document.getElementById('modal-payload').textContent = lines.join('\n') || '(no payload details)';
+  // Commercial context: what this costs and who it reaches. Without it the card
+  // showed "Offer #2", which tells a reviewer nothing about what is being given away.
+  const a = payload.audience || {};
+  if (a.avg_arpu != null || a.hvc_count != null) {
+    const sub = [];
+    if (a.hvc_count != null) sub.push(`${Number(a.hvc_count).toLocaleString()} high-value`);
+    if (a.avg_arpu != null)  sub.push(`avg ARPU ${a.avg_arpu} Yuan`);
+    if (a.monthly_revenue != null)
+      sub.push(`${Number(a.monthly_revenue).toLocaleString()} Yuan/month at stake`);
+    html.push(`<div class="op-sub">${esc(sub.join('  ·  '))}</div>`);
+  }
+
+  const facts = [];
+  if (payload.campaign_type) facts.push(['Campaign type', payload.campaign_type]);
+  const o = payload.offer || {};
+  if (o.offer_name) {
+    const terms = [];
+    if (o.discount_pct)   terms.push(`${o.discount_pct}% discount`);
+    if (o.bonus_data_gb)  terms.push(`${o.bonus_data_gb} GB bonus`);
+    if (o.validity_days)  terms.push(`${o.validity_days} days`);
+    facts.push(['Offer', o.offer_name + (terms.length ? ` — ${terms.join(', ')}` : '')]);
+  } else if (payload.offer_id) {
+    facts.push(['Offer', `#${payload.offer_id}`]);
+  }
+  if (payload.region)        facts.push(['Region', payload.region]);
+  if (payload.cell_ids)      facts.push(['Cells', payload.cell_ids.join(', ')]);
+  if (payload.row_count != null) facts.push(['Rows', payload.row_count]);
+  if (payload.filename)      facts.push(['File', payload.filename]);
+  if (payload.columns)       facts.push(['Columns', payload.columns.join(', ')]);
+  if (facts.length) {
+    html.push('<dl class="op-facts">' +
+      facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('') + '</dl>');
+  }
+
+  if (payload.message && action.type !== 'sms') {
+    html.push(`<div class="op-block"><span class="op-block-h">Message</span>
+               <p>${esc(payload.message)}</p></div>`);
+  }
+
+  if (payload.recommendations && payload.recommendations.length) {
+    html.push('<div class="op-block"><span class="op-block-h">Recommendations</span><ol>' +
+      payload.recommendations.map(r =>
+        `<li>${esc(typeof r === 'string' ? r : (r.text || JSON.stringify(r)))}</li>`).join('') +
+      '</ol></div>');
+  }
+
+  if (payload.sql) {
+    html.push(`<details class="op-sql"><summary>Audience query</summary>
+               <pre>${esc(payload.sql)}</pre></details>`);
+  }
+
+  document.getElementById('modal-payload').innerHTML =
+    html.join('') || '<span class="op-empty">No further detail supplied.</span>';
 
   // Show editable SMS field if type is sms
   const smsWrap = document.getElementById('modal-sms-wrap');

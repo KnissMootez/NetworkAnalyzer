@@ -316,8 +316,17 @@ def export_msisdn(req: ExportRequest):
     sql = req.sql.strip()
     if not re.match(r'^\s*SELECT\b', sql, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Only SELECT queries are allowed for export.")
+    # Reject stacked statements outright -- that is the only way a second,
+    # destructive statement could arrive. (sqlite3's execute() already refuses
+    # more than one statement, so this is belt and braces.)
+    if re.search(r";\s*\S", sql):
+        raise HTTPException(status_code=400, detail="Only a single SELECT statement is allowed.")
+    # Then look for a destructive keyword only where it could START a statement.
+    # Scanning the whole query matched 'drop' used as a COLUMN ALIAS -- a KPI
+    # export aliasing dropped_call_rate was refused as an attempted DROP. A
+    # keyword in the middle of a projection cannot execute anything.
     for forbidden in ("INSERT","UPDATE","DELETE","DROP","ALTER","CREATE","ATTACH"):
-        if re.search(rf'\b{forbidden}\b', sql, re.IGNORECASE):
+        if re.search(rf'(?:^|;)\s*{forbidden}\b', sql, re.IGNORECASE):
             raise HTTPException(status_code=400, detail=f"Forbidden keyword: {forbidden}")
     # Strip trailing incomplete tokens (truncated LLM output)
     sql = re.sub(r'[,\s]+$', '', sql.rstrip())
@@ -493,7 +502,12 @@ async def ws_chat(websocket: WebSocket, model: str = "qwen3"):
 def api_metrics():
     subs   = query_sc("SELECT COUNT(*) as n FROM subscribers WHERE is_active=1")
     alarms = query_sc("SELECT COUNT(*) as n FROM network_alarms WHERE severity='critical' AND is_active=1")
-    hvc    = query_op("SELECT COUNT(*) as n FROM customer_value WHERE segment IN ('gold','platinum')")
+    # customer_value has no 'segment' column (it is 'value_segment'), so the old
+    # query errored and the .get("n", 0) fallback silently reported 0 HVCs.
+    # HVC is the is_hvc flag (platinum top decile), not gold+platinum, and the
+    # month filter is mandatory - there are 6+ rows per subscriber.
+    hvc    = query_op("SELECT COUNT(DISTINCT msisdn) as n FROM customer_value "
+                      "WHERE is_hvc=1 AND month=(SELECT MAX(month) FROM customer_value)")
     fwa    = query_sc("""
         SELECT COUNT(DISTINCT s.msisdn) as n
         FROM subscribers s
@@ -1002,6 +1016,22 @@ def ops_send(body: OpsSendRequest):
         return {"ok": True, "topic": topic}
     except Exception as e:
         raise HTTPException(500, f"MQTT publish failed: {e}")
+
+class FastPathRequest(BaseModel):
+    enabled: bool = True
+
+@app.post("/api/fastpath")
+def api_fastpath(body: FastPathRequest):
+    """Toggle the single-shot fast path at runtime.
+
+    run_agent reads FAST_PATH on every call, so this takes effect on the next
+    question with no restart. Off means every question runs the full reasoning
+    loop -- slower, but the steps panel shows the whole chain.
+    """
+    os.environ["FAST_PATH"] = "1" if body.enabled else "0"
+    print(f"[FastPath] {'enabled' if body.enabled else 'DISABLED'} via UI")
+    return {"ok": True, "fast_path": body.enabled}
+
 
 @app.post("/api/reset")
 def api_reset():

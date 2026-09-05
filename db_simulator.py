@@ -542,7 +542,18 @@ def backfill_monthly_sc():
                         (msisdn, m)
                     )), random.uniform(1, 40)
                 )
-                is_fwa = 1 if (mob_cls == "stationary" and total_gb > 30) else 0
+                # 30 GB is a FULL-month threshold. Month-to-date usage can never
+                # reach it early in a month, so every row written in the first
+                # days of a month was flagged 0 and -- because the flag is only
+                # computed here, at insert time -- stayed 0 for the whole month.
+                # Normalise to a full-month rate before comparing.
+                _days = next(
+                    (r[0] for r in sc_query(
+                        "SELECT days_active FROM dou_monthly WHERE msisdn=? AND month=?",
+                        (msisdn, m)
+                    )), None)
+                _rate_gb = (total_gb * 30.0 / _days) if (_days and _days > 0) else total_gb
+                is_fwa = 1 if (mob_cls == "stationary" and _rate_gb > 30) else 0
                 mob_rows.append((
                     msisdn, m, cells_count,
                     round(cells_count / 30, 2),
@@ -2174,10 +2185,24 @@ def _insert_new_subscriber(verbose=False):
     # Column list is explicit: VALUES(...) silently went stale when `nation` was
     # added, so every new subscriber failed to insert while the technology,
     # device and usage rows below still went in -- creating orphans each tick.
-    sc_write("INSERT OR IGNORE INTO subscribers "
-             "(msisdn, imsi, sim_type, is_active, activation_date, region, city, "
-             "latitude, longitude, area_code, nation) VALUES (?,?,?,1,?,?,?,?,?,?,?)",
-             (msisdn, imsi, "SIM", now, region, city, lat, lon, area_code, nation))
+    # The subscriber row is a PRECONDITION, not the first of several writes.
+    # Naming the columns stops this particular insert going stale, but the real
+    # protection is refusing to continue: everything below -- technology, device,
+    # usage, and the whole commercial side -- keys off this msisdn, so writing any
+    # of it without the subscriber is what manufactured 368 orphans. If the row
+    # cannot be created, no other row is either, and the tick simply skips.
+    if not sc_write("INSERT OR IGNORE INTO subscribers "
+                    "(msisdn, imsi, sim_type, is_active, activation_date, region, city, "
+                    "latitude, longitude, area_code, nation) VALUES (?,?,?,1,?,?,?,?,?,?,?)",
+                    (msisdn, imsi, "SIM", now, region, city, lat, lon, area_code, nation)):
+        print(f"  [NEW SUB ABORTED] subscribers insert failed for {msisdn} — "
+              f"no commercial rows written, so no orphan is created")
+        return False
+    if not sc_query("SELECT 1 FROM subscribers WHERE msisdn=?", (msisdn,)):
+        # INSERT OR IGNORE succeeds silently on a constraint clash; without this
+        # the same orphan appears with no error to show for it.
+        print(f"  [NEW SUB ABORTED] {msisdn} not present after insert — skipping")
+        return False
     sc_write("INSERT OR IGNORE INTO subscriber_technology VALUES (?,?,?,?,?,?)",
              (msisdn, tech, cell_id, 0, 0, now))
     sc_write("INSERT OR IGNORE INTO devices VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -2195,7 +2220,12 @@ def _insert_new_subscriber(verbose=False):
     seg    = random.choices(["prepaid","postpaid"], weights=[0.6, 0.4])[0]
     nat_id = f"AV{random.randint(10000000, 99999999)}"
 
-    op_write("INSERT OR IGNORE INTO customers VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+    # Named columns here too — this was the last positional VALUES() left, and it
+    # is the same trap: add a column to customers and it fails silently.
+    op_write("INSERT OR IGNORE INTO customers "
+             "(msisdn, full_name, national_id, date_of_birth, gender, email, address, "
+             "region, city, segment, registration_date, is_active) "
+             "VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
              (msisdn, f"{fname} {lname}", nat_id, dob, gender, email,
               f"{city} Street {random.randint(1,999)}", region, city, seg, now))
 

@@ -283,17 +283,38 @@ def score_all_heuristic(op_path=None, sc_path=None, write=True):
     # correlation +0.15), so a "decline against baseline" computed from them is
     # noise. customer_value.arpu carries forward with drift (+0.998), which is
     # what makes a trend term mean anything.
+    # A monthly scorecard needs COMPLETE months. Usage accrues day by day, so on
+    # the 4th of a month dou_monthly holds ~0.6 GB against a finished August of
+    # ~40 GB, and days_active holds ~1.4 against 30. Fed in raw, that reads as a
+    # 98% collapse in usage and near-total disengagement for every subscriber
+    # alive -- which is exactly what it did: 27,530 of 50,340 jumped a band on the
+    # 4th of September. The partial month is excluded until it closes; the score
+    # is still WRITTEN to the current month, it is just computed from months that
+    # actually finished.
+    _cur = _date.today().strftime("%Y-%m")
+    _last_complete = op.execute(
+        "SELECT MAX(month) FROM customer_value WHERE month < ?", (_cur,)).fetchone()[0]
+    if _last_complete is None:                     # no finished month yet
+        _last_complete = month
+    if _last_complete != month:
+        print(f"[HEURISTIC] {month} is incomplete — features read up to {_last_complete}")
+    _upto = _last_complete
+
     arpu  = _collect(op.execute(
-        "SELECT msisdn, arpu FROM customer_value ORDER BY msisdn, month DESC").fetchall())
+        "SELECT msisdn, arpu FROM customer_value WHERE month<=? "
+        "ORDER BY msisdn, month DESC", (_upto,)).fetchall())
     paid  = _collect(op.execute(
         "SELECT msisdn, CASE WHEN payment_status='paid' THEN 1 ELSE 0 END "
-        "FROM billing ORDER BY msisdn, billing_month DESC").fetchall())
+        "FROM billing WHERE billing_month<=? "
+        "ORDER BY msisdn, billing_month DESC", (_upto,)).fetchall())
     data_ = _collect(sc.execute(
-        "SELECT msisdn, total_data_gb FROM dou_monthly ORDER BY msisdn, month DESC").fetchall())
+        "SELECT msisdn, total_data_gb FROM dou_monthly WHERE month<=? "
+        "ORDER BY msisdn, month DESC", (_upto,)).fetchall())
     voice = _collect(sc.execute(
-        "SELECT msisdn, voice_minutes FROM ott_monthly ORDER BY msisdn, month DESC").fetchall())
+        "SELECT msisdn, voice_minutes FROM ott_monthly WHERE month<=? "
+        "ORDER BY msisdn, month DESC", (_upto,)).fetchall())
     days  = dict(sc.execute(
-        "SELECT msisdn, days_active FROM dou_monthly WHERE month=(SELECT MAX(month) FROM dou_monthly)").fetchall())
+        "SELECT msisdn, days_active FROM dou_monthly WHERE month=?", (_upto,)).fetchall())
     today = _date.today()
     tenure = {}
     for m, act in sc.execute("SELECT msisdn, activation_date FROM subscribers").fetchall():

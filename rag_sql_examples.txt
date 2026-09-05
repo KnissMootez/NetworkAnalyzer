@@ -103,7 +103,7 @@ title: FWA candidates count latest month
 tags: fwa fixed wireless access candidates count
 question: How many FWA candidates do we have?
 db: SC
-sql: SELECT COUNT(*) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
+sql: SELECT COUNT(*) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
 ==END==
 
 ==DOC==
@@ -111,7 +111,7 @@ title: FWA candidates by region
 tags: fwa candidates region breakdown
 question: How many FWA candidates are there per region?
 db: SC
-sql: SELECT s.region, COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) GROUP BY s.region ORDER BY n DESC
+sql: SELECT s.region, COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) GROUP BY s.region ORDER BY n DESC
 ==END==
 
 ==DOC==
@@ -119,7 +119,7 @@ title: FWA candidates revenue potential by region
 tags: fwa candidates revenue potential arpu region breakdown convert conversion commercial
 question: What is the revenue potential of FWA candidates broken down by region?
 db: BOTH
-sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_revenue_potential FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY total_revenue_potential DESC
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_revenue_potential FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value) GROUP BY s.region ORDER BY total_revenue_potential DESC
 ==END==
 
 ==DOC==
@@ -127,7 +127,7 @@ title: FWA candidates overall summary with ARPU
 tags: fwa candidates total count arpu overall summary convert conversion
 question: Give me an overall summary of FWA conversion candidates with their ARPU
 db: BOTH
-sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as total_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_monthly_revenue FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value)
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as total_candidates, ROUND(AVG(op.customer_value.arpu),2) as avg_arpu, ROUND(SUM(op.customer_value.arpu),2) as total_monthly_revenue FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.customer_value ON mp.msisdn=op.customer_value.msisdn WHERE mp.mobility_class IN ('stationary','low_mobility') AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND op.customer_value.month=(SELECT MAX(month) FROM op.customer_value)
 ==END==
 
 ==DOC==
@@ -135,7 +135,7 @@ title: FWA candidates not on FWA plan
 tags: fwa candidates plan upsell
 question: How many FWA candidates are not subscribed to an FWA plan?
 db: BOTH
-sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT mp.msisdn) as n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0
 ==END==
 
 ==DOC==
@@ -143,7 +143,7 @@ title: FWA candidates average data usage
 tags: fwa data usage average monthly
 question: What is the average monthly data usage of FWA candidates?
 db: SC
-sql: SELECT ROUND(AVG(dm.total_data_gb),2) as avg_data_gb FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
+sql: SELECT ROUND(AVG(dm.total_data_gb),2) as avg_data_gb FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile)
 ==END==
 
 ==DOC==
@@ -455,7 +455,7 @@ title: FWA candidates not on FWA plan by region cross-DB
 tags: fwa candidates plan region cross-db upsell
 question: Show FWA candidates who are not on an FWA plan, broken down by region
 db: BOTH
-sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_gap FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0 GROUP BY s.region ORDER BY fwa_gap DESC
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT s.region, COUNT(DISTINCT mp.msisdn) as fwa_gap FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn JOIN op.subscriptions sub ON mp.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND p.is_fwa_plan=0 GROUP BY s.region ORDER BY fwa_gap DESC
 ==END==
 
 ==DOC==
@@ -563,4 +563,40 @@ question: What service issues are live right now across the base? How many activ
 db: SC
 sql: SELECT affected_service, severity, COUNT(*) AS active_incidents, SUM(is_hvc) AS hvc_affected FROM experience_incidents WHERE status='active' GROUP BY affected_service, severity ORDER BY active_incidents DESC
 note: A right-now situation snapshot of the live issue log. status='active' = currently ongoing. hvc_affected (SUM(is_hvc)) shows how many of each are hitting high-value customers. Drop the GROUP BY for a single total. These self-heal on their own over minutes (the simulator resolves them), so counts shift between asks — that's expected, it's real-time.
+==END==
+
+==DOC==
+title: Active service incidents at a named cell site
+tags: incident incidents site site_name cell site outage issue issues affected subscribers hvc right now currently live diagnose
+question: What is going on at cell site SITE_0153 right now, how many subscribers are affected and how many are high value?
+db: SC
+sql: SELECT ei.root_cause, ei.affected_service, ei.severity, COUNT(*) AS affected, SUM(ei.is_hvc) AS hvc_affected, MIN(ei.started_at) AS started_at, MIN(ei.expected_resolution_at) AS expected_clear FROM experience_incidents ei JOIN cells c ON ei.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE s.site_name='SITE_0153' AND ei.status='active' GROUP BY ei.root_cause, ei.affected_service, ei.severity ORDER BY affected DESC
+note: A SITE NAME IS NOT ON experience_incidents. region/value_segment/is_hvc are snapshotted on the row so those need no join, but site_name and cell technology live in sites/cells -- you MUST join experience_incidents -> cells (on cell_id) -> sites (on site_id) to filter by a site. NEVER widen a site question to its region: 'SITE_0153 in Ba Sing Se' means WHERE s.site_name='SITE_0153', NOT WHERE s.region='Ba Sing Se' -- the region has many more incidents and answering with the region total silently answers a different question. Group by root_cause so multiple concurrent faults at one site stay separate.
+==END==
+
+==DOC==
+title: Which sites have live incidents right now
+tags: sites site incidents active live map rings worst affected which where outage now
+question: Which sites currently have active service incidents?
+db: SC
+sql: SELECT s.site_name, s.region, COUNT(*) AS affected, SUM(ei.is_hvc) AS hvc_affected, GROUP_CONCAT(DISTINCT ei.root_cause) AS causes, MAX(CASE ei.severity WHEN 'critical' THEN 3 WHEN 'major' THEN 2 ELSE 1 END) AS sev_rank, MIN(ei.started_at) AS since FROM experience_incidents ei JOIN cells c ON ei.cell_id=c.cell_id JOIN sites s ON c.site_id=s.site_id WHERE ei.status='active' GROUP BY s.site_id ORDER BY sev_rank DESC, affected DESC
+note: One row per SITE, not per subscriber -- a cell-scoped fault writes one incident row per affected subscriber, so COUNT(*) is people affected while the row itself is the site. This is the same shape the coverage map draws its rings from, so a question about 'which sites are in trouble' and the map always agree.
+==END==
+
+==DOC==
+title: FWA users - subscribers actually ON an FWA plan
+tags: fwa users subscribers customers on fwa plan existing base how many fwa fixed wireless subscribed active
+question: How many FWA users do we have?
+db: BOTH
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT COUNT(DISTINCT s.msisdn) as n FROM subscribers s JOIN op.subscriptions sub ON s.msisdn=sub.msisdn AND sub.is_current=1 JOIN op.plans p ON sub.plan_id=p.plan_id WHERE p.is_fwa_plan=1 AND s.is_active=1
+note: ALWAYS JOIN THROUGH subscribers -- operator tables carry orphaned rows whose subscriber no longer exists (55 orphaned FWA subscriptions, 378 orphaned subscriber_technology rows, left by an identifier migration that never cascaded). Counting op.subscriptions alone returns 79; joining to subscribers returns the true 24. The same applies to any count over customers, subscriptions, billing or customer_value. FWA USERS AND FWA CANDIDATES ARE ALSO DIFFERENT POPULATIONS. An FWA USER / FWA SUBSCRIBER / "on FWA" is someone whose CURRENT PLAN has is_fwa_plan=1 -- query subscriptions JOIN plans in the operator DB. An FWA CANDIDATE is mobility_profile.is_fwa_candidate=1 (stationary + heavy data), i.e. someone who SHOULD be on FWA but is not. Never answer "how many FWA users" with the candidate count: candidates are the opportunity, users are the existing base. If the question says users / subscribers / customers / "on FWA" / "already on", use this query. If it says candidates / opportunity / potential / eligible / "should be", use the mobility_profile query.
+==END==
+
+==DOC==
+title: FWA base vs FWA opportunity side by side
+tags: fwa users candidates compare gap opportunity penetration existing base conversion
+question: How many FWA users do we have versus how many FWA candidates?
+db: SC
+sql: ATTACH DATABASE 'operator_new.db' AS op; SELECT (SELECT COUNT(DISTINCT sub.msisdn) FROM op.subscriptions sub JOIN op.plans p ON sub.plan_id=p.plan_id WHERE p.is_fwa_plan=1 AND sub.is_current=1) AS fwa_users, (SELECT COUNT(DISTINCT msisdn) FROM mobility_profile WHERE is_fwa_candidate=1 AND month=(SELECT MAX(month) FROM mobility_profile)) AS fwa_candidates
+note: Use this when the question compares the existing FWA base against the conversion opportunity, or asks about FWA penetration. The candidate count is far larger than the user count -- that gap IS the commercial opportunity, so reporting one number for both destroys the point of the question.
 ==END==

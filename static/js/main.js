@@ -7,6 +7,7 @@ const App = (() => {
   let t0 = null;
 
   function init() {
+    _restoreFastPath();
     // Tab switching
     document.querySelectorAll(".tab-btn").forEach(btn => {
       btn.addEventListener("click", () => _switchTab(btn.dataset.tab));
@@ -153,6 +154,26 @@ const App = (() => {
       WS.connect(activeModel);
       closeSettings();
     });
+  }
+
+  // ── Fast path toggle ──────────────────────────────────────
+  // Diagnostic switch. Off routes every question through the full reasoning
+  // loop instead of the single-shot path, so the steps panel shows the chain.
+  function setFastPath(on) {
+    try { localStorage.setItem("na-fastpath", on ? "1" : "0"); } catch (e) {}
+    fetch("/api/fastpath", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!on })
+    }).catch(() => {});
+  }
+
+  function _restoreFastPath() {
+    let on = true;
+    try { on = localStorage.getItem("na-fastpath") !== "0"; } catch (e) {}
+    const box = document.getElementById("fastpath-toggle");
+    if (box) box.checked = on;
+    if (!on) setFastPath(false);   // re-apply across a server restart
   }
 
   function stop() {
@@ -564,7 +585,7 @@ const App = (() => {
       .catch(() => {});
   }
 
-  return { init, send, stop, continueResponse, quickQuery, sendSilent, confirm, cancel, snapTab, toggleSnapshot, applyModel, forgetMemory, scanAlerts, setTheme, toggleTheme, openSettings, closeSettings, flashCoverage, toggleIssuesOnly };
+  return { init, send, stop, setFastPath, continueResponse, quickQuery, sendSilent, confirm, cancel, snapTab, toggleSnapshot, applyModel, forgetMemory, scanAlerts, setTheme, toggleTheme, openSettings, closeSettings, flashCoverage, toggleIssuesOnly };
 })();
 
 document.addEventListener("DOMContentLoaded", App.init);

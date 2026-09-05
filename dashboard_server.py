@@ -202,7 +202,7 @@ def subs_summary(region: str = ""):
     total = _scalar(sc(f"SELECT COUNT(DISTINCT s.msisdn) AS n FROM subscribers s JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE s.is_active=1{rf}", a), "n")
     on5g  = _scalar(sc(f"SELECT COUNT(*) AS n FROM subscriber_technology st JOIN subscribers s ON s.msisdn=st.msisdn WHERE st.current_technology='5G' AND s.is_active=1{rf}", a), "n")
     on3g  = _scalar(sc(f"SELECT COUNT(*) AS n FROM subscriber_technology st JOIN subscribers s ON s.msisdn=st.msisdn WHERE st.current_technology='3G' AND s.is_active=1{rf}", a), "n")
-    fwa   = _scalar(sc(f"SELECT COUNT(DISTINCT mp.msisdn) AS n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND s.is_active=1{rf}", a), "n")
+    fwa   = _scalar(sc(f"SELECT COUNT(DISTINCT mp.msisdn) AS n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month JOIN subscribers s ON mp.msisdn=s.msisdn WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile) AND s.is_active=1{rf}", a), "n")
     return JSONResponse({"total": total, "on_5g": on5g, "on_3g": on3g, "fwa": fwa})
 
 
@@ -388,7 +388,7 @@ def camp_offers():
 def camp_opportunities():
     five_g    = _scalar(sc("SELECT COUNT(DISTINCT s.msisdn) AS n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.is_5g_capable=1 AND st.current_technology='4G' AND EXISTS(SELECT 1 FROM coverage cv WHERE cv.msisdn=s.msisdn AND cv.technology_available='5G')"), "n")
     migration = _scalar(sc("SELECT COUNT(DISTINCT s.msisdn) AS n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.max_technology IN ('4G','5G') AND st.current_technology='3G'"), "n")
-    fwa       = _scalar(sc("SELECT COUNT(DISTINCT mp.msisdn) AS n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND dm.total_data_gb>30 AND mp.month=(SELECT MAX(month) FROM mobility_profile)"), "n")
+    fwa       = _scalar(sc("SELECT COUNT(DISTINCT mp.msisdn) AS n FROM mobility_profile mp JOIN dou_monthly dm ON mp.msisdn=dm.msisdn AND mp.month=dm.month WHERE mp.mobility_class='stationary' AND mp.is_fwa_candidate=1 AND mp.month=(SELECT MAX(month) FROM mobility_profile)"), "n")
     volte     = _scalar(sc("SELECT COUNT(DISTINCT s.msisdn) AS n FROM subscribers s JOIN devices d ON s.msisdn=d.msisdn JOIN subscriber_technology st ON s.msisdn=st.msisdn WHERE d.volte_capable=1 AND st.current_technology='3G' AND st.volte_active=0"), "n")
     hvc       = _scalar(op("SELECT COUNT(*) AS n FROM customer_value cv JOIN subscriptions s ON cv.msisdn=s.msisdn AND s.is_current=1 JOIN plans p ON s.plan_id=p.plan_id WHERE cv.is_hvc=1 AND p.supports_5g=0 AND cv.month=(SELECT MAX(month) FROM customer_value)"), "n")
     return JSONResponse([

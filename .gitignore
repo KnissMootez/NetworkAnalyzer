@@ -27,3 +27,6 @@ export*.csv
 
 # Downloaded external project
 odysseus/
+
+# PFE report kept private
+report/

@@ -38,7 +38,7 @@ An **XGBoost** churn model (SMOTE-balanced) reaches **AUC-ROC 0.885** on a publi
 
 ## Run it
 
-Requires Python 3.12+, AWS credentials with Bedrock access, and the databases from the `db-backup` branch (see `dbbackup/RESTORE_DB.md` on that branch).
+Requires Python 3.13+, AWS credentials with Bedrock access, and the databases from the `db-backup` branch (see `dbbackup/RESTORE_DB.md` on that branch).
 
 ```bash
 pip install -r requirements.txt
